@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TripStatus {
+  DRAFT
+  READY
+  ERROR
+}
+
+model AdminUser {
+  id         String            @id @default(cuid())
+  email      String            @unique
+  passwordHash String
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  llmConfig  LlmProviderConfig?
+  trips      Trip[]
+}
+
+model LlmProviderConfig {
+  id              String    @id @default(cuid())
+  ownerId         String    @unique
+  owner           AdminUser @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  baseUrl         String
+  apiKeyEncrypted String
+  model           String
+  apiStyle        String    @default("openai")
+  temperature     Float     @default(0.3)
+  enabled         Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Trip {
+  id            String     @id @default(cuid())
+  ownerId       String
+  owner         AdminUser  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  title         String
+  destination   String
+  startDate     DateTime
+  days          Int
+  status        TripStatus @default(DRAFT)
+  request       Json
+  itinerary     Json
+  planningIssues Json?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  lastPlannedAt DateTime?
+}

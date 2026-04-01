@@ -29,6 +29,7 @@ export async function POST(request: Request) {
     });
     return jsonOk(result);
   } catch (error) {
-    return jsonError("Connection test failed.", 400, error instanceof Error ? error.message : error);
+    const message = error instanceof Error ? error.message : "Connection test failed.";
+    return jsonError(message, 400);
   }
 }

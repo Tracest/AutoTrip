@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { requestStructuredJson, testOpenAICompatibleConnection } from "@/lib/llm/openai-compatible";
+import {
+  requestStructuredJson,
+  resolveChatCompletionsUrl,
+  testOpenAICompatibleConnection
+} from "@/lib/llm/openai-compatible";
 
 describe("openai compatible client", () => {
   const originalFetch = global.fetch;
@@ -28,6 +32,19 @@ describe("openai compatible client", () => {
 
     expect(result.ok).toBe(true);
     expect(result.preview).toBe("ok");
+    expect(result.endpoint).toBe("https://example.com/v1/chat/completions");
+  });
+
+  it("accepts a full chat completions endpoint as the base url", () => {
+    expect(resolveChatCompletionsUrl("https://example.com/v1/chat/completions")).toBe(
+      "https://example.com/v1/chat/completions"
+    );
+  });
+
+  it("rejects responses api paths with an actionable error", () => {
+    expect(() => resolveChatCompletionsUrl("https://example.com/responses")).toThrow(
+      /chat\/completions, not a Responses API path/
+    );
   });
 
   it("parses structured JSON from an OpenAI-compatible response", async () => {

@@ -43,6 +43,7 @@ type StreamEvent =
 
 type ApiError = {
   error?: string;
+  details?: string;
 };
 
 const interestOptions = ["历史", "博物馆", "自然", "美食", "夜景", "亲子", "建筑", "拍照"];
@@ -69,6 +70,11 @@ function formatDate(value: string) {
 
 function isTripDetail(payload: TripDetail | ApiError): payload is TripDetail {
   return !("error" in payload);
+}
+
+function getApiErrorMessage(payload: ApiError | null | undefined, fallback: string) {
+  if (!payload) return fallback;
+  return payload.error ?? payload.details ?? fallback;
 }
 
 async function parseNdjson(response: Response, onEvent: (event: StreamEvent) => void) {
@@ -316,9 +322,9 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
       },
       body: JSON.stringify(config)
     });
-    const payload = (await response.json()) as { error?: string };
+    const payload = (await response.json()) as ApiError;
     setIsBusy(false);
-    setConfigStatus(response.ok ? "模型配置已保存。" : payload.error ?? "保存失败。");
+    setConfigStatus(response.ok ? "模型配置已保存。" : getApiErrorMessage(payload, "保存失败。"));
   }
 
   async function testConfig() {
@@ -331,9 +337,13 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
       },
       body: JSON.stringify(config)
     });
-    const payload = (await response.json()) as { error?: string; preview?: string };
+    const payload = (await response.json()) as ApiError & { preview?: string; endpoint?: string };
     setIsBusy(false);
-    setConfigStatus(response.ok ? `连接成功，模型返回：${payload.preview ?? "ok"}` : payload.error ?? "连接失败。");
+    setConfigStatus(
+      response.ok
+        ? `连接成功，模型返回：${payload.preview ?? "ok"}${payload.endpoint ? ` · ${payload.endpoint}` : ""}`
+        : getApiErrorMessage(payload, "连接失败。")
+    );
   }
 
   async function planTrip() {
@@ -498,6 +508,10 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                   onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))}
                   placeholder="https://api.openai.com/v1"
                 />
+                <p className="text-xs leading-5 text-black/45">
+                  支持填写基础 URL，例如 `https://api.openai.com/v1`，也支持直接填写完整的
+                  `/chat/completions` 地址。不要填写 `/responses` 路径。
+                </p>
               </label>
               <label className="block space-y-2">
                 <span className="text-sm text-black/60">API Key</span>

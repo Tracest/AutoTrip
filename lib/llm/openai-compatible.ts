@@ -18,7 +18,25 @@ type TestConnectionOptions = {
 };
 
 function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  return baseUrl.trim();
+}
+
+export function resolveChatCompletionsUrl(baseUrl: string) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  const url = new URL(normalized);
+  const pathname = url.pathname.replace(/\/+$/, "");
+
+  if (pathname.endsWith("/chat/completions")) {
+    return url.toString();
+  }
+
+  if (pathname.endsWith("/responses") || pathname.endsWith("/v1/responses")) {
+    throw new Error(
+      "This app expects an OpenAI-compatible base URL for chat/completions, not a Responses API path. Use the provider root, a /v1 base URL, or a full /chat/completions endpoint."
+    );
+  }
+
+  return new URL("chat/completions", normalized.endsWith("/") ? normalized : `${normalized}/`).toString();
 }
 
 function extractJsonObject(raw: string) {
@@ -32,20 +50,56 @@ function extractJsonObject(raw: string) {
 }
 
 async function postChatCompletion(baseUrl: string, apiKey: string, body: Record<string, unknown>) {
-  const endpoint = new URL("chat/completions", normalizeBaseUrl(baseUrl));
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(body),
-    cache: "no-store"
-  });
+  const endpoint = resolveChatCompletionsUrl(baseUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      signal: controller.signal
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`LLM request timed out after 20s. Endpoint: ${endpoint}`);
+    }
+    throw new Error(
+      `Unable to reach the model endpoint ${endpoint}. ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  clearTimeout(timeout);
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`LLM request failed: ${response.status} ${message}`);
+    const raw = await response.text();
+    let detail = raw;
+
+    try {
+      const parsed = JSON.parse(raw) as {
+        error?: {
+          message?: string;
+          type?: string;
+          code?: string | number;
+        };
+        message?: string;
+      };
+      detail =
+        parsed.error?.message ??
+        parsed.message ??
+        raw;
+    } catch {
+      // Keep raw response text when it is not JSON.
+    }
+
+    throw new Error(`LLM request failed (${response.status}) at ${endpoint}: ${detail}`);
   }
 
   return (await response.json()) as {
@@ -77,7 +131,8 @@ export async function testOpenAICompatibleConnection(options: TestConnectionOpti
   const content = payload.choices?.[0]?.message?.content?.trim().toLowerCase();
   return {
     ok: Boolean(content),
-    preview: content ?? ""
+    preview: content ?? "",
+    endpoint: resolveChatCompletionsUrl(options.baseUrl)
   };
 }
 

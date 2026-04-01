@@ -84,4 +84,29 @@ describe("openai compatible client", () => {
       label: "trip"
     });
   });
+
+  it("retries once on a retryable upstream failure", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "ok" } }]
+          }),
+          { status: 200 }
+        )
+      ) as typeof fetch;
+
+    const result = await testOpenAICompatibleConnection({
+      baseUrl: "https://example.com/v1",
+      apiKey: "test-key",
+      model: "demo",
+      temperature: 0.2,
+      retries: 1
+    });
+
+    expect(result.ok).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
 });

@@ -68,6 +68,19 @@ function formatDate(value: string) {
   });
 }
 
+function formatCandidateSource(source?: string) {
+  switch (source) {
+    case "amap":
+      return "高德地图";
+    case "llm-fallback":
+      return "LLM 候选点回退";
+    case "mock":
+      return "占位 Mock 数据";
+    default:
+      return source ?? "未知";
+  }
+}
+
 function isTripDetail(payload: TripDetail | ApiError): payload is TripDetail {
   return !("error" in payload);
 }
@@ -811,6 +824,11 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                     <p>
                       <span className="font-medium text-ink">兴趣：</span>
                       {selectedTrip.request.interests.join(" / ")}
+                    </p>
+                    <p>
+                      <span className="font-medium text-ink">候选点来源：</span>
+                      {formatCandidateSource(selectedTrip.itinerary.metadata.candidateSource)} ·
+                      {selectedTrip.itinerary.metadata.candidateCount ?? 0} 个候选点
                     </p>
                     {selectedTrip.itinerary.metadata.betaNotice ? (
                       <p className="text-accent">{selectedTrip.itinerary.metadata.betaNotice}</p>

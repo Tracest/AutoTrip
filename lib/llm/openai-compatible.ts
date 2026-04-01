@@ -8,6 +8,8 @@ type CompletionOptions<T extends z.ZodTypeAny> = {
   systemPrompt: string;
   userPrompt: string;
   schema: T;
+  timeoutMs?: number;
+  retries?: number;
 };
 
 type TestConnectionOptions = {
@@ -15,7 +17,22 @@ type TestConnectionOptions = {
   apiKey: string;
   model: string;
   temperature: number;
+  timeoutMs?: number;
+  retries?: number;
 };
+
+type PostChatCompletionOptions = {
+  baseUrl: string;
+  apiKey: string;
+  body: Record<string, unknown>;
+  timeoutMs?: number;
+  retries?: number;
+};
+
+const DEFAULT_TEST_TIMEOUT_MS = Number(process.env.LLM_TEST_TIMEOUT_MS ?? 20_000);
+const DEFAULT_PLANNING_TIMEOUT_MS = Number(process.env.LLM_PLANNING_TIMEOUT_MS ?? 90_000);
+const DEFAULT_TEST_RETRIES = Number(process.env.LLM_TEST_RETRIES ?? 0);
+const DEFAULT_PLANNING_RETRIES = Number(process.env.LLM_PLANNING_RETRIES ?? 1);
 
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.trim();
@@ -49,83 +66,122 @@ function extractJsonObject(raw: string) {
   return raw.slice(start, end + 1);
 }
 
-async function postChatCompletion(baseUrl: string, apiKey: string, body: Record<string, unknown>) {
+function isRetryableStatus(status: number) {
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function postChatCompletion({
+  baseUrl,
+  apiKey,
+  body,
+  timeoutMs = DEFAULT_PLANNING_TIMEOUT_MS,
+  retries = DEFAULT_PLANNING_RETRIES
+}: PostChatCompletionOptions) {
   const endpoint = resolveChatCompletionsUrl(baseUrl);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  let attempt = 0;
 
-  let response: Response;
-  try {
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(body),
-      cache: "no-store",
-      signal: controller.signal
-    });
-  } catch (error) {
-    clearTimeout(timeout);
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`LLM request timed out after 20s. Endpoint: ${endpoint}`);
-    }
-    throw new Error(
-      `Unable to reach the model endpoint ${endpoint}. ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
+  while (true) {
+    attempt += 1;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  clearTimeout(timeout);
-
-  if (!response.ok) {
-    const raw = await response.text();
-    let detail = raw;
-
+    let response: Response;
     try {
-      const parsed = JSON.parse(raw) as {
-        error?: {
-          message?: string;
-          type?: string;
-          code?: string | number;
-        };
-        message?: string;
-      };
-      detail =
-        parsed.error?.message ??
-        parsed.message ??
-        raw;
-    } catch {
-      // Keep raw response text when it is not JSON.
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+        signal: controller.signal
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      const canRetry = attempt <= retries;
+      if (error instanceof Error && error.name === "AbortError") {
+        if (canRetry) {
+          await delay(Math.min(1_500 * attempt, 4_000));
+          continue;
+        }
+        throw new Error(`LLM request timed out after ${Math.round(timeoutMs / 1000)}s. Endpoint: ${endpoint}`);
+      }
+      if (canRetry) {
+        await delay(Math.min(1_500 * attempt, 4_000));
+        continue;
+      }
+      throw new Error(
+        `Unable to reach the model endpoint ${endpoint}. ${error instanceof Error ? error.message : String(error)}`
+      );
     }
 
-    throw new Error(`LLM request failed (${response.status}) at ${endpoint}: ${detail}`);
-  }
+    clearTimeout(timeout);
 
-  return (await response.json()) as {
-    choices?: Array<{
-      message?: {
-        content?: string;
-      };
-    }>;
-  };
+    if (!response.ok) {
+      const raw = await response.text();
+      let detail = raw;
+
+      try {
+        const parsed = JSON.parse(raw) as {
+          error?: {
+            message?: string;
+            type?: string;
+            code?: string | number;
+          };
+          message?: string;
+        };
+        detail =
+          parsed.error?.message ??
+          parsed.message ??
+          raw;
+      } catch {
+        // Keep raw response text when it is not JSON.
+      }
+
+      if (attempt <= retries && isRetryableStatus(response.status)) {
+        await delay(Math.min(1_500 * attempt, 4_000));
+        continue;
+      }
+
+      throw new Error(`LLM request failed (${response.status}) at ${endpoint}: ${detail}`);
+    }
+
+    return (await response.json()) as {
+      choices?: Array<{
+        message?: {
+          content?: string;
+        };
+      }>;
+    };
+  }
 }
 
 export async function testOpenAICompatibleConnection(options: TestConnectionOptions) {
-  const payload = await postChatCompletion(options.baseUrl, options.apiKey, {
-    model: options.model,
-    temperature: options.temperature,
-    max_tokens: 8,
-    messages: [
-      {
-        role: "system",
-        content: "Reply with the single word ok."
-      },
-      {
-        role: "user",
-        content: "ok"
-      }
-    ]
+  const payload = await postChatCompletion({
+    baseUrl: options.baseUrl,
+    apiKey: options.apiKey,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
+    retries: options.retries ?? DEFAULT_TEST_RETRIES,
+    body: {
+      model: options.model,
+      temperature: options.temperature,
+      max_tokens: 8,
+      messages: [
+        {
+          role: "system",
+          content: "Reply with the single word ok."
+        },
+        {
+          role: "user",
+          content: "ok"
+        }
+      ]
+    }
   });
 
   const content = payload.choices?.[0]?.message?.content?.trim().toLowerCase();
@@ -137,19 +193,25 @@ export async function testOpenAICompatibleConnection(options: TestConnectionOpti
 }
 
 export async function requestStructuredJson<T extends z.ZodTypeAny>(options: CompletionOptions<T>) {
-  const payload = await postChatCompletion(options.baseUrl, options.apiKey, {
-    model: options.model,
-    temperature: options.temperature,
-    messages: [
-      {
-        role: "system",
-        content: `${options.systemPrompt}\nReturn JSON only. Do not wrap it in markdown.`
-      },
-      {
-        role: "user",
-        content: options.userPrompt
-      }
-    ]
+  const payload = await postChatCompletion({
+    baseUrl: options.baseUrl,
+    apiKey: options.apiKey,
+    timeoutMs: options.timeoutMs ?? DEFAULT_PLANNING_TIMEOUT_MS,
+    retries: options.retries ?? DEFAULT_PLANNING_RETRIES,
+    body: {
+      model: options.model,
+      temperature: options.temperature,
+      messages: [
+        {
+          role: "system",
+          content: `${options.systemPrompt}\nReturn JSON only. Do not wrap it in markdown.`
+        },
+        {
+          role: "user",
+          content: options.userPrompt
+        }
+      ]
+    }
   });
 
   const content = payload.choices?.[0]?.message?.content;

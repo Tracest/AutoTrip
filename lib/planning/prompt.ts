@@ -34,3 +34,34 @@ export function buildPlannerUserPrompt(request: TripRequest, rankedPois: Candida
     2
   );
 }
+
+export function buildPoiResearchSystemPrompt() {
+  return [
+    "You are a travel POI researcher.",
+    "Return real-world points of interest for the given destination and interests.",
+    "Prefer famous, actually existing places over generic recommendations.",
+    "Do not invent placeholder names, fake addresses, or synthetic identifiers.",
+    "Return JSON only."
+  ].join(" ");
+}
+
+export function buildPoiResearchUserPrompt(request: TripRequest, desiredCount: number) {
+  return JSON.stringify(
+    {
+      destination: request.destination,
+      interests: request.interests,
+      mustVisit: request.mustVisit,
+      hotelArea: request.hotelArea,
+      notes: request.notes,
+      desiredCount,
+      requirements: {
+        useRealPoisOnly: true,
+        mixFoodAndSightseeing: true,
+        includeApproximateCoordinates: true,
+        avoidPlaceholderWords: ["推荐点", "示例地址", "poi 1", "spot 1"]
+      }
+    },
+    null,
+    2
+  );
+}

@@ -37,6 +37,27 @@ export const poiSchema = z.object({
   openingHoursText: z.string().optional()
 });
 
+const flexibleNumberSchema = z.preprocess((value) => {
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isNaN(parsed) ? value : parsed;
+  }
+  return value;
+}, z.number());
+
+export const relaxedPoiSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  address: z.string().optional(),
+  city: z.string().optional(),
+  country: z.string().optional(),
+  categories: z.array(z.string()).optional(),
+  latitude: flexibleNumberSchema.optional(),
+  longitude: flexibleNumberSchema.optional(),
+  recommendedDurationMinutes: z.number().int().min(30).max(360).optional(),
+  openingHoursText: z.string().optional()
+});
+
 export const itineraryItemSchema = z.object({
   id: z.string(),
   poi: poiSchema,
@@ -49,12 +70,32 @@ export const itineraryItemSchema = z.object({
   locked: z.boolean().default(false)
 });
 
+export const relaxedItineraryItemSchema = z.object({
+  id: z.string().optional(),
+  poi: relaxedPoiSchema,
+  category: z.string().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
+  durationMinutes: z.number().int().min(15).max(480).optional(),
+  travelMinutesFromPrevious: z.number().int().min(0).max(300).optional(),
+  notes: z.string().optional(),
+  locked: z.boolean().optional()
+});
+
 export const itineraryDaySchema = z.object({
   date: z.string(),
   title: z.string(),
   totalTravelMinutes: z.number().int().min(0),
   intensityScore: z.number().min(0).max(10),
   items: z.array(itineraryItemSchema).default([])
+});
+
+export const relaxedItineraryDaySchema = z.object({
+  date: z.string().optional(),
+  title: z.string().optional(),
+  totalTravelMinutes: z.number().int().min(0).optional(),
+  intensityScore: z.number().min(0).max(10).optional(),
+  items: z.array(relaxedItineraryItemSchema).default([])
 });
 
 export const itinerarySchema = z.object({
@@ -64,9 +105,27 @@ export const itinerarySchema = z.object({
   metadata: z.object({
     usedModel: z.string().optional(),
     geoProvider: z.string(),
+    candidateSource: z.string().optional(),
+    candidateCount: z.number().int().nonnegative().optional(),
     betaNotice: z.string().optional(),
     createdAt: z.string()
   })
+});
+
+export const relaxedItinerarySchema = z.object({
+  request: tripRequestSchema.optional(),
+  days: z.array(relaxedItineraryDaySchema),
+  issues: z.array(planningIssueSchema).optional(),
+  metadata: z
+    .object({
+      usedModel: z.string().optional(),
+      geoProvider: z.string().optional(),
+      candidateSource: z.string().optional(),
+      candidateCount: z.number().int().nonnegative().optional(),
+      betaNotice: z.string().optional(),
+      createdAt: z.string().optional()
+    })
+    .optional()
 });
 
 export const tripSummarySchema = z.object({

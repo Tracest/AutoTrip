@@ -22,6 +22,7 @@ export const llmSettingsResponseSchema = z.object({
   temperature: z.number().optional(),
   apiStyle: z.literal("openai").optional(),
   enabled: z.boolean().optional(),
+  hasApiKey: z.boolean().optional(),
   configured: z.boolean()
 });
 

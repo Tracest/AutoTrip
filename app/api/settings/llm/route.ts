@@ -17,7 +17,8 @@ export async function GET() {
         model: user.llmConfig.model,
         apiStyle: "openai",
         temperature: user.llmConfig.temperature,
-        enabled: user.llmConfig.enabled
+        enabled: user.llmConfig.enabled,
+        hasApiKey: true
       }
     : {
         configured: false
@@ -72,7 +73,8 @@ export async function PUT(request: Request) {
       model: updated.model,
       temperature: updated.temperature,
       apiStyle: "openai",
-      enabled: updated.enabled
+      enabled: updated.enabled,
+      hasApiKey: true
     });
   } catch (error) {
     return jsonError("Unable to save LLM settings.", 400, error instanceof Error ? error.message : error);

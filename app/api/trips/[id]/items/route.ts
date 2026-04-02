@@ -2,7 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db/prisma";
 import { requireAdminUser } from "@/lib/auth/guards";
 import { itineraryDaySchema, itinerarySchema } from "@/lib/schemas/trip";
-import { mergeIssues, repairItinerary } from "@/lib/planning/validator";
+import { repairItinerary } from "@/lib/planning/validator";
 import { jsonError, jsonOk } from "@/lib/utils/http";
 import { serializeTripDetail } from "@/lib/trips/serialization";
 
@@ -40,16 +40,15 @@ export async function PATCH(request: Request, context: Context) {
       ...current,
       days: payload.days
     });
-    const mergedIssues = mergeIssues(current.issues, repaired.issues);
 
     const updated = await prisma.trip.update({
       where: { id: trip.id },
       data: {
         itinerary: {
           ...repaired.itinerary,
-          issues: mergedIssues
+          issues: repaired.issues
         },
-        planningIssues: mergedIssues
+        planningIssues: repaired.issues
       }
     });
 
@@ -59,7 +58,7 @@ export async function PATCH(request: Request, context: Context) {
         request: trip.request,
         itinerary: {
           ...repaired.itinerary,
-          issues: mergedIssues
+          issues: repaired.issues
         }
       })
     );

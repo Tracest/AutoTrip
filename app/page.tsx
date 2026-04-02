@@ -23,16 +23,17 @@ export default async function HomePage() {
 
   const initialConfig: LlmSettingsResponse = user.llmConfig
     ? {
-        configured: true,
-        baseUrl: user.llmConfig.baseUrl,
-        model: user.llmConfig.model,
-        apiStyle: "openai",
-        temperature: user.llmConfig.temperature,
-        enabled: user.llmConfig.enabled
-      }
-    : {
-        configured: false
-      };
+      configured: true,
+      baseUrl: user.llmConfig.baseUrl,
+      model: user.llmConfig.model,
+      apiStyle: "openai",
+      temperature: user.llmConfig.temperature,
+      enabled: user.llmConfig.enabled,
+      hasApiKey: true
+    }
+  : {
+      configured: false
+    };
 
   return (
     <DashboardClient

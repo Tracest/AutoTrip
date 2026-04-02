@@ -10,7 +10,8 @@ import {
   RefreshCcw,
   Save,
   Settings2,
-  Sparkles
+  Sparkles,
+  Trash2
 } from "lucide-react";
 import { startTransition, useEffect, useState, type ReactNode } from "react";
 import {
@@ -28,7 +29,7 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { mergeIssues, repairItinerary, validateItinerary } from "@/lib/planning/validator";
+import { repairItinerary } from "@/lib/planning/validator";
 import type {
   Itinerary,
   ItineraryDay,
@@ -85,16 +86,15 @@ const defaultTripRequest: TripRequest = {
   notes: ""
 };
 
-const panelClass = "rounded-[28px] border border-slate-200/80 bg-white/95 p-5 shadow-soft backdrop-blur md:p-6";
+const panelClass =
+  "rounded-[24px] border border-slate-200/90 bg-white/95 p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)] backdrop-blur md:p-5";
 const fieldClass =
-  "w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-accent focus:ring-4 focus:ring-accent/10";
-const textAreaClass = `${fieldClass} min-h-[96px] resize-y`;
+  "w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-accent focus:ring-4 focus:ring-accent/10";
+const textAreaClass = `${fieldClass} min-h-[84px] resize-y`;
 const secondaryButtonClass =
   "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-60";
 const accentButtonClass =
   "rounded-2xl bg-accent px-4 py-3 text-sm font-medium text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70";
-const pineButtonClass =
-  "rounded-2xl bg-pine px-4 py-3 text-sm font-medium text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70";
 
 function formatDate(value: string) {
   const date = new Date(value);
@@ -193,11 +193,10 @@ function recomputeItinerary(itinerary: Itinerary) {
     ...itinerary,
     issues: []
   });
-  const mergedIssues = mergeIssues(itinerary.issues, repaired.issues);
 
   return {
     ...repaired.itinerary,
-    issues: mergedIssues
+    issues: repaired.issues
   };
 }
 
@@ -260,9 +259,9 @@ function toggleItemLock(itinerary: Itinerary, itemId: string) {
 function SectionHeading({ icon, title, description }: SectionHeadingProps) {
   return (
     <div className="flex items-start gap-3">
-      <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">{icon}</div>
+      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">{icon}</div>
       <div>
-        <h2 className="text-lg font-semibold text-slate-950">{title}</h2>
+        <h2 className="text-base font-semibold text-slate-950">{title}</h2>
         <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p>
       </div>
     </div>
@@ -278,10 +277,10 @@ function MetricCard({ label, value, hint, tone = "default" }: MetricCardProps) {
         : "border-slate-200 bg-white/90";
 
   return (
-    <div className={cn("rounded-[24px] border p-4", toneClass)}>
+    <div className={cn("rounded-[20px] border px-4 py-3", toneClass)}>
       <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">{label}</p>
-      <p className="mt-3 text-lg font-semibold text-slate-950">{value}</p>
-      <p className="mt-2 text-sm leading-6 text-slate-500">{hint}</p>
+      <p className="mt-2 text-base font-semibold text-slate-950">{value}</p>
+      <p className="mt-1.5 text-sm leading-6 text-slate-500">{hint}</p>
     </div>
   );
 }
@@ -294,11 +293,11 @@ function DayColumn({
   onToggleLock: (itemId: string) => void;
 }) {
   return (
-    <section className="rounded-[26px] border border-slate-200 bg-white p-4 shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
+    <section className="rounded-[22px] border border-slate-200 bg-white p-3.5 shadow-[0_10px_28px_rgba(15,23,42,0.06)]">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">{day.date}</p>
-          <h3 className="mt-2 text-lg font-semibold text-slate-950">{day.title}</h3>
+          <h3 className="mt-1.5 text-base font-semibold text-slate-950">{day.title}</h3>
         </div>
         <div className="rounded-2xl bg-slate-100 px-3 py-2 text-right text-xs text-slate-500">
           <p>{day.totalTravelMinutes} 分通勤</p>
@@ -307,13 +306,13 @@ function DayColumn({
       </div>
       <SortableContext items={day.items.map((item) => item.id)} strategy={verticalListSortingStrategy}>
         {day.items.length > 0 ? (
-          <div className="mt-4 space-y-3">
+          <div className="mt-3.5 space-y-3">
             {day.items.map((item) => (
               <SortableItem key={item.id} item={item} onToggleLock={onToggleLock} />
             ))}
           </div>
         ) : (
-          <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-500">
+          <div className="mt-3.5 rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-500">
             这一天还没有安排项目。
           </div>
         )}
@@ -343,7 +342,7 @@ function SortableItem({
       ref={setNodeRef}
       style={style}
       className={cn(
-        "cursor-grab rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4 transition active:cursor-grabbing",
+        "cursor-grab rounded-[20px] border border-slate-200 bg-slate-50 px-3.5 py-3.5 transition active:cursor-grabbing",
         isDragging && "opacity-60 shadow-soft ring-2 ring-accent/20"
       )}
       {...attributes}
@@ -402,20 +401,32 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     enabled: initialConfig.enabled ?? true
   });
   const [hasSavedConfig, setHasSavedConfig] = useState(initialConfig.configured);
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(initialConfig.hasApiKey ?? false);
   const [configStatus, setConfigStatus] = useState(initialConfig.configured ? "模型已配置，可以直接开始规划。" : "先填写模型地址和模型名。");
   const [planningStatus, setPlanningStatus] = useState("先完成模型配置，然后填写需求并开始规划。");
   const [tripSummaries, setTripSummaries] = useState<TripSummary[]>(initialTrips);
   const [selectedTrip, setSelectedTrip] = useState<TripDetail | null>(null);
   const [loadingTripId, setLoadingTripId] = useState<string | null>(null);
+  const [deletingTripId, setDeletingTripId] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [workspaceIssues, setWorkspaceIssues] = useState<PlanningIssue[]>([]);
 
-  const activeIssues = selectedTrip?.itinerary.issues.length ? selectedTrip.itinerary.issues : workspaceIssues;
+  const activeIssues = selectedTrip ? workspaceIssues : [];
   const issueSummary = {
     warnings: activeIssues.filter((issue) => issue.severity === "warning").length,
     errors: activeIssues.filter((issue) => issue.severity === "error").length
   };
   const canPlan = tripForm.destination.trim().length > 0 && tripForm.interests.length > 0 && !isBusy;
+  const planningButtonLabel = isBusy ? "规划中..." : "开始规划路线";
+  const planningChecklist = [
+    `目的地 ${tripForm.destination || "未填写"}`,
+    `${tripForm.days} 天`,
+    `${tripForm.travelers} 人`,
+    tripForm.interests.length > 0 ? tripForm.interests.join(" / ") : "未选兴趣"
+  ];
+  const planningHint = hasSavedConfig
+    ? "关键信息填好后，直接点右侧按钮开始规划。"
+    : "先保存模型配置，再开始生成路线。";
 
   useEffect(() => {
     if (initialTrips[0]) {
@@ -440,6 +451,40 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setPlanningStatus("已加载历史行程，可以继续检查、拖拽和保存。");
   }
 
+  async function deleteTrip(tripId: string) {
+    if (!window.confirm("确认删除这条历史行程吗？删除后无法恢复。")) {
+      return;
+    }
+
+    setDeletingTripId(tripId);
+    const response = await fetch(`/api/trips/${tripId}`, {
+      method: "DELETE"
+    });
+    const payload = (await response.json().catch(() => null)) as ApiError | null;
+    setDeletingTripId(null);
+
+    if (!response.ok) {
+      setPlanningStatus(getApiErrorMessage(payload, "删除历史行程失败。"));
+      return;
+    }
+
+    const remaining = tripSummaries.filter((trip) => trip.id !== tripId);
+    setTripSummaries(remaining);
+
+    if (selectedTrip?.id === tripId) {
+      setSelectedTrip(null);
+      setWorkspaceIssues([]);
+
+      if (remaining[0]) {
+        setPlanningStatus("已删除当前行程，正在打开下一条历史记录。");
+        void loadTrip(remaining[0].id);
+        return;
+      }
+    }
+
+    setPlanningStatus("已删除该历史行程。");
+  }
+
   async function saveConfig() {
     setIsBusy(true);
     const response = await fetch("/api/settings/llm", {
@@ -458,7 +503,9 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     }
 
     setHasSavedConfig(true);
-    setConfigStatus("模型配置已保存。");
+    setHasStoredApiKey(hasStoredApiKey || config.apiKey.trim().length > 0);
+    setConfig((current) => ({ ...current, apiKey: "" }));
+    setConfigStatus("模型配置已保存。API Key 已安全存储，后续留空即可沿用。");
   }
 
   async function testConfig() {
@@ -594,7 +641,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
         ...selectedTrip,
         itinerary: nextItinerary
       });
-      setWorkspaceIssues(validateItinerary(nextItinerary));
+      setWorkspaceIssues(nextItinerary.issues);
       setPlanningStatus("已在本地重排行程，记得点击保存。");
     });
   }
@@ -611,19 +658,19 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   }
 
   return (
-    <main className="min-h-screen px-4 py-5 md:px-8 md:py-8">
-      <div className="mx-auto max-w-[1560px] space-y-6">
-        <section className="rounded-[32px] border border-white/70 bg-white/85 p-6 shadow-soft backdrop-blur md:p-8">
-          <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
+    <main className="min-h-screen px-4 py-4 md:px-6 md:py-6">
+      <div className="mx-auto max-w-[1480px] space-y-4">
+        <section className="rounded-[26px] border border-white/80 bg-white/90 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.08)] backdrop-blur md:p-6">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div className="max-w-3xl">
               <p className="text-sm font-medium uppercase tracking-[0.24em] text-slate-400">AutoTrip Planner</p>
-              <h1 className="mt-4 text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">AI 出游路线工作台</h1>
-              <p className="mt-4 max-w-2xl text-base leading-8 text-slate-600">
-                把模型配置、行程生成和拖拽编辑放在同一个页面里。先连通模型，再填写需求，最后在右侧直接检查并调整每日安排。
+              <h1 className="mt-3 text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">AI 出游路线工作台</h1>
+              <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-600 md:text-base">
+                用一个更直接的页面完成模型配置、行程生成和编辑，不需要在多个视图之间来回切换。
               </p>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 xl:w-[560px]">
+            <div className="grid gap-2.5 sm:grid-cols-2 xl:w-[520px]">
               <MetricCard label="当前账号" value={userEmail} hint="当前管理员已登录" />
               <MetricCard
                 label="模型状态"
@@ -645,7 +692,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
             </div>
           </div>
 
-          <div className="mt-6 rounded-[28px] border border-slate-200/80 bg-slate-50/90 p-4 md:p-5">
+          <div className="mt-4 rounded-[20px] border border-slate-200/90 bg-slate-50/90 p-4">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <p className="text-sm font-medium text-slate-500">当前进度</p>
@@ -666,8 +713,44 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
           </div>
         </section>
 
-        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-          <aside className="space-y-6 xl:sticky xl:top-6 xl:self-start">
+        <section className="sticky top-3 z-20 rounded-[24px] border border-pine/15 bg-white/92 p-4 shadow-[0_12px_30px_rgba(15,23,42,0.10)] backdrop-blur">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-pine/10 text-pine">
+                  <MapPinned className="h-5 w-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-slate-500">主操作</p>
+                  <h2 className="text-lg font-semibold text-slate-950">开始新的路线规划</h2>
+                </div>
+              </div>
+              <p className="mt-2.5 text-sm leading-7 text-slate-600">{planningHint}</p>
+              <div className="mt-2.5 flex flex-wrap gap-2">
+                {planningChecklist.map((item) => (
+                  <span key={item} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600">
+                    {item}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 xl:min-w-[260px] xl:items-end">
+              <button
+                type="button"
+                onClick={planTrip}
+                disabled={!canPlan}
+                className="w-full rounded-2xl bg-pine px-5 py-3.5 text-base font-semibold text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60 xl:w-[260px]"
+              >
+                {planningButtonLabel}
+              </button>
+              <p className="text-xs leading-5 text-slate-500">按钮固定在上方，填完核心信息后可以直接开始。</p>
+            </div>
+          </div>
+        </section>
+
+        <div className="grid gap-4 xl:grid-cols-[332px_minmax(0,1fr)]">
+          <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
             <section className={panelClass}>
               <SectionHeading
                 icon={<Settings2 className="h-5 w-5" />}
@@ -696,8 +779,13 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                     type="password"
                     value={config.apiKey}
                     onChange={(event) => setConfig((current) => ({ ...current, apiKey: event.target.value }))}
-                    placeholder="sk-..."
+                    placeholder={hasStoredApiKey ? "已保存旧密钥，如需替换再输入新 Key" : "sk-..."}
                   />
+                  <p className="text-xs leading-5 text-slate-500">
+                    {hasStoredApiKey
+                      ? "当前账号已经保存了 API Key。这里留空会继续使用原来的密钥，只有在更换密钥时才需要重新输入。"
+                      : "首次保存时需要填写 API Key。"}
+                  </p>
                 </label>
 
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -761,7 +849,19 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                 description="按最常用的顺序填写，生成后会自动进入右侧编辑区。"
               />
 
-              <div className="mt-6 space-y-4">
+              <div className="mt-5 rounded-[20px] border border-pine/15 bg-pine/6 p-4">
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-950">先填表单，再点上方主按钮</p>
+                    <p className="mt-1 text-sm leading-6 text-slate-500">这一栏只负责输入需求，减少注意力分散。</p>
+                  </div>
+                  <div className="rounded-full border border-pine/15 bg-white px-3 py-2 text-xs font-medium text-pine">
+                    当前：{tripForm.destination || "未填写目的地"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 space-y-4">
                 <label className="block space-y-2">
                   <span className="text-sm font-medium text-slate-600">目的地</span>
                   <input
@@ -928,14 +1028,10 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                   />
                 </label>
               </div>
-
-              <button type="button" onClick={planTrip} disabled={!canPlan} className={cn("mt-5 w-full", pineButtonClass)}>
-                {isBusy ? "规划中..." : "开始规划路线"}
-              </button>
             </section>
           </aside>
 
-          <section className="space-y-6">
+          <section className="space-y-4">
             <section className={panelClass}>
               <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <SectionHeading
@@ -949,42 +1045,76 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
               </div>
 
               {tripSummaries.length === 0 ? (
-                <div className="mt-5 rounded-[24px] border border-dashed border-slate-200 bg-slate-50 px-5 py-8 text-sm leading-7 text-slate-500">
+                <div className="mt-4 rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-5 py-7 text-sm leading-7 text-slate-500">
                   还没有保存的行程。完成一次规划后，这里会自动出现历史记录。
                 </div>
               ) : (
-                <div className="mt-5 grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                  {tripSummaries.map((trip) => (
-                    <button
-                      key={trip.id}
-                      type="button"
-                      onClick={() => void loadTrip(trip.id)}
-                      className={cn(
-                        "rounded-[24px] border px-4 py-4 text-left transition",
-                        selectedTrip?.id === trip.id
-                          ? "border-accent bg-accent/6 shadow-[0_12px_30px_rgba(208,91,50,0.12)]"
-                          : "border-slate-200 bg-slate-50/80 hover:border-accent/35 hover:bg-white"
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-base font-semibold text-slate-950">{trip.destination}</p>
-                          <p className="mt-1 text-sm leading-6 text-slate-600">{trip.title}</p>
-                        </div>
-                        {loadingTripId === trip.id ? (
-                          <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
-                        ) : (
-                          <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-500">
-                            {trip.days} 天
-                          </span>
+                <div className="mt-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+                  {tripSummaries.map((trip) => {
+                    const isSelected = selectedTrip?.id === trip.id;
+                    const isLoading = loadingTripId === trip.id;
+                    const isDeleting = deletingTripId === trip.id;
+
+                    return (
+                      <article
+                        key={trip.id}
+                        className={cn(
+                          "rounded-[20px] border px-4 py-4 transition",
+                          isSelected
+                            ? "border-accent bg-accent/6 shadow-[0_12px_30px_rgba(208,91,50,0.12)]"
+                            : "border-slate-200 bg-slate-50/80 hover:border-accent/25 hover:bg-white"
                         )}
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-500">
-                        <span>出发 {formatDate(trip.startDate)}</span>
-                        <span>更新于 {formatDateTime(trip.updatedAt)}</span>
-                      </div>
-                    </button>
-                  ))}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-base font-semibold text-slate-950">{trip.destination}</p>
+                            <p className="mt-1 line-clamp-2 text-sm leading-6 text-slate-600">{trip.title}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void deleteTrip(trip.id)}
+                            disabled={isDeleting}
+                            className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500 transition hover:border-red-200 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isDeleting ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                            删除
+                          </button>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                          <span>出发 {formatDate(trip.startDate)}</span>
+                          <span>{trip.days} 天</span>
+                          <span>更新于 {formatDateTime(trip.updatedAt)}</span>
+                        </div>
+
+                        <div className="mt-4 flex items-center justify-between gap-3">
+                          <span
+                            className={cn(
+                              "rounded-full border px-3 py-1 text-xs font-medium",
+                              isSelected
+                                ? "border-accent/20 bg-white text-accent"
+                                : "border-slate-200 bg-white text-slate-500"
+                            )}
+                          >
+                            {isSelected ? "当前打开" : "历史行程"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void loadTrip(trip.id)}
+                            disabled={isLoading || isDeleting}
+                            className={cn(
+                              "rounded-xl px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60",
+                              isSelected
+                                ? "bg-accent text-white hover:brightness-95"
+                                : "border border-slate-200 bg-white text-slate-700 hover:border-accent hover:text-accent"
+                            )}
+                          >
+                            {isLoading ? "加载中..." : "打开"}
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               )}
             </section>
@@ -1024,37 +1154,37 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
               </div>
 
               {!selectedTrip ? (
-                <div className="mt-6 grid gap-4 lg:grid-cols-3">
-                  <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-6">
+                <div className="mt-5 grid gap-3 lg:grid-cols-3">
+                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-5 py-5">
                     <p className="text-sm font-semibold text-slate-950">先连接模型</p>
                     <p className="mt-2 text-sm leading-7 text-slate-500">填写 Base URL、Key 和模型名，确保测试连接成功。</p>
                   </div>
-                  <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-6">
+                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-5 py-5">
                     <p className="text-sm font-semibold text-slate-950">再填写需求</p>
                     <p className="mt-2 text-sm leading-7 text-slate-500">目的地、日期、天数和兴趣标签是最核心的输入项。</p>
                   </div>
-                  <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-6">
+                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-5 py-5">
                     <p className="text-sm font-semibold text-slate-950">最后直接编辑</p>
                     <p className="mt-2 text-sm leading-7 text-slate-500">生成后就在这里拖拽、锁定、检查问题并保存。</p>
                   </div>
                 </div>
               ) : (
-                <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+                <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
                   <div className="space-y-4">
                     <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-                      <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
                         <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">出发日期</p>
                         <p className="mt-2 text-base font-semibold text-slate-950">{formatDate(selectedTrip.startDate)}</p>
                       </div>
-                      <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
                         <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">旅行人数</p>
                         <p className="mt-2 text-base font-semibold text-slate-950">{selectedTrip.request.travelers} 人</p>
                       </div>
-                      <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
                         <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">行程节奏</p>
                         <p className="mt-2 text-base font-semibold text-slate-950">{formatPace(selectedTrip.request.pace)}</p>
                       </div>
-                      <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
                         <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">候选点</p>
                         <p className="mt-2 text-base font-semibold text-slate-950">
                           {selectedTrip.itinerary.metadata.candidateCount ?? 0} 个

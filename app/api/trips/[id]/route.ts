@@ -28,3 +28,26 @@ export async function GET(_request: Request, context: Context) {
 
   return jsonOk(serializeTripDetail(trip));
 }
+
+export async function DELETE(_request: Request, context: Context) {
+  const user = await requireAdminUser();
+  if (!user) {
+    return jsonError("Unauthorized.", 401);
+  }
+
+  const deleted = await prisma.trip.deleteMany({
+    where: {
+      id: context.params.id,
+      ownerId: user.id
+    }
+  });
+
+  if (deleted.count === 0) {
+    return jsonError("Trip not found.", 404);
+  }
+
+  return jsonOk({
+    deleted: true,
+    id: context.params.id
+  });
+}

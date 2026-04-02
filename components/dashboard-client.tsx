@@ -3,6 +3,7 @@
 import {
   AlertTriangle,
   CalendarDays,
+  ChevronDown,
   GripVertical,
   LoaderCircle,
   Lock,
@@ -61,13 +62,13 @@ type ApiError = {
 type SectionHeadingProps = {
   icon: ReactNode;
   title: string;
-  description: string;
+  description?: string;
+  action?: ReactNode;
 };
 
-type MetricCardProps = {
+type StatusBadgeProps = {
   label: string;
   value: string;
-  hint: string;
   tone?: "default" | "accent" | "pine";
 };
 
@@ -87,14 +88,14 @@ const defaultTripRequest: TripRequest = {
 };
 
 const panelClass =
-  "rounded-[24px] border border-slate-200/90 bg-white/95 p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)] backdrop-blur md:p-5";
+  "rounded-[22px] border border-slate-200/90 bg-white/95 p-3.5 shadow-[0_12px_32px_rgba(15,23,42,0.08)] backdrop-blur md:p-4";
 const fieldClass =
   "w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 outline-none transition focus:border-accent focus:ring-4 focus:ring-accent/10";
 const textAreaClass = `${fieldClass} min-h-[84px] resize-y`;
 const secondaryButtonClass =
-  "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-60";
+  "rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-60";
 const accentButtonClass =
-  "rounded-2xl bg-accent px-4 py-3 text-sm font-medium text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70";
+  "rounded-2xl bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70";
 
 function formatDate(value: string) {
   const date = new Date(value);
@@ -256,31 +257,33 @@ function toggleItemLock(itinerary: Itinerary, itemId: string) {
   });
 }
 
-function SectionHeading({ icon, title, description }: SectionHeadingProps) {
+function SectionHeading({ icon, title, description, action }: SectionHeadingProps) {
   return (
-    <div className="flex items-start gap-3">
-      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">{icon}</div>
-      <div>
-        <h2 className="text-base font-semibold text-slate-950">{title}</h2>
-        <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p>
+    <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">{icon}</div>
+        <div>
+          <h2 className="text-base font-semibold text-slate-950">{title}</h2>
+          {description ? <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p> : null}
+        </div>
       </div>
+      {action ? <div className="shrink-0">{action}</div> : null}
     </div>
   );
 }
 
-function MetricCard({ label, value, hint, tone = "default" }: MetricCardProps) {
+function StatusBadge({ label, value, tone = "default" }: StatusBadgeProps) {
   const toneClass =
     tone === "accent"
-      ? "border-accent/15 bg-accent/5"
+      ? "border-accent/15 bg-accent/8 text-accent"
       : tone === "pine"
-        ? "border-pine/15 bg-pine/5"
-        : "border-slate-200 bg-white/90";
+        ? "border-pine/15 bg-pine/8 text-pine"
+        : "border-slate-200 bg-white text-slate-600";
 
   return (
-    <div className={cn("rounded-[20px] border px-4 py-3", toneClass)}>
-      <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">{label}</p>
-      <p className="mt-2 text-base font-semibold text-slate-950">{value}</p>
-      <p className="mt-1.5 text-sm leading-6 text-slate-500">{hint}</p>
+    <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium", toneClass)}>
+      <span className="text-slate-400">{label}</span>
+      <span>{value}</span>
     </div>
   );
 }
@@ -404,6 +407,8 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   const [hasStoredApiKey, setHasStoredApiKey] = useState(initialConfig.hasApiKey ?? false);
   const [configStatus, setConfigStatus] = useState(initialConfig.configured ? "模型已配置，可以直接开始规划。" : "先填写模型地址和模型名。");
   const [planningStatus, setPlanningStatus] = useState("先完成模型配置，然后填写需求并开始规划。");
+  const [configExpanded, setConfigExpanded] = useState(!initialConfig.configured);
+  const [tripAdvancedExpanded, setTripAdvancedExpanded] = useState(false);
   const [tripSummaries, setTripSummaries] = useState<TripSummary[]>(initialTrips);
   const [selectedTrip, setSelectedTrip] = useState<TripDetail | null>(null);
   const [loadingTripId, setLoadingTripId] = useState<string | null>(null);
@@ -424,9 +429,9 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     `${tripForm.travelers} 人`,
     tripForm.interests.length > 0 ? tripForm.interests.join(" / ") : "未选兴趣"
   ];
-  const planningHint = hasSavedConfig
-    ? "关键信息填好后，直接点右侧按钮开始规划。"
-    : "先保存模型配置，再开始生成路线。";
+  const configSummary = hasSavedConfig
+    ? `${config.model || "未填写模型"} · ${config.baseUrl || "未填写地址"}`
+    : "尚未完成模型配置";
 
   useEffect(() => {
     if (initialTrips[0]) {
@@ -505,6 +510,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setHasSavedConfig(true);
     setHasStoredApiKey(hasStoredApiKey || config.apiKey.trim().length > 0);
     setConfig((current) => ({ ...current, apiKey: "" }));
+    setConfigExpanded(false);
     setConfigStatus("模型配置已保存。API Key 已安全存储，后续留空即可沿用。");
   }
 
@@ -657,211 +663,189 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setWorkspaceIssues(nextItinerary.issues);
   }
 
+  const selectedTripChips = selectedTrip
+    ? [
+        `目的地 ${selectedTrip.request.destination}`,
+        `兴趣 ${selectedTrip.request.interests.join(" / ")}`,
+        `来源 ${formatCandidateSource(selectedTrip.itinerary.metadata.candidateSource)}`,
+        selectedTrip.request.hotelArea ? `酒店 ${selectedTrip.request.hotelArea}` : null,
+        selectedTrip.request.mustVisit.length > 0 ? `必去 ${selectedTrip.request.mustVisit.join(" / ")}` : null
+      ].filter((item): item is string => Boolean(item))
+    : [];
+
+  const workspaceNotes = selectedTrip
+    ? [
+        selectedTrip.request.notes ? `补充要求：${selectedTrip.request.notes}` : null,
+        selectedTrip.itinerary.metadata.betaNotice ? `提示：${selectedTrip.itinerary.metadata.betaNotice}` : null
+      ].filter((item): item is string => Boolean(item))
+    : [];
+
   return (
-    <main className="min-h-screen px-4 py-4 md:px-6 md:py-6">
-      <div className="mx-auto max-w-[1480px] space-y-4">
-        <section className="rounded-[26px] border border-white/80 bg-white/90 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.08)] backdrop-blur md:p-6">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-            <div className="max-w-3xl">
-              <p className="text-sm font-medium uppercase tracking-[0.24em] text-slate-400">AutoTrip Planner</p>
-              <h1 className="mt-3 text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">AI 出游路线工作台</h1>
-              <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-600 md:text-base">
-                用一个更直接的页面完成模型配置、行程生成和编辑，不需要在多个视图之间来回切换。
-              </p>
-            </div>
-
-            <div className="grid gap-2.5 sm:grid-cols-2 xl:w-[520px]">
-              <MetricCard label="当前账号" value={userEmail} hint="当前管理员已登录" />
-              <MetricCard
-                label="模型状态"
-                value={hasSavedConfig ? "已配置" : "待配置"}
-                hint={configStatus}
-                tone={hasSavedConfig ? "pine" : "accent"}
-              />
-              <MetricCard
-                label="已保存行程"
-                value={`${tripSummaries.length} 条`}
-                hint={selectedTrip ? `当前打开：${selectedTrip.destination}` : "生成后会自动加入历史记录"}
-              />
-              <MetricCard
-                label="当前检查"
-                value={`${issueSummary.errors} 个错误 / ${issueSummary.warnings} 个提醒`}
-                hint={selectedTrip ? "保存前建议先处理明显冲突" : "生成行程后会在这里显示"}
-                tone={issueSummary.errors > 0 ? "accent" : "default"}
-              />
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-[20px] border border-slate-200/90 bg-slate-50/90 p-4">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-500">当前进度</p>
-                <p className="mt-2 text-base leading-7 text-slate-700">{planningStatus}</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500">
-                  1. 配置模型
-                </span>
-                <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500">
-                  2. 填写需求
-                </span>
-                <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500">
-                  3. 拖拽调整并保存
-                </span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="sticky top-3 z-20 rounded-[24px] border border-pine/15 bg-white/92 p-4 shadow-[0_12px_30px_rgba(15,23,42,0.10)] backdrop-blur">
+    <main className="min-h-screen px-4 py-4 md:px-5 md:py-5">
+      <div className="mx-auto max-w-[1440px] space-y-4">
+        <section className="rounded-[24px] border border-white/80 bg-white/92 p-4 shadow-[0_10px_28px_rgba(15,23,42,0.07)] backdrop-blur md:p-5">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-pine/10 text-pine">
-                  <MapPinned className="h-5 w-5" />
+            <div className="space-y-3">
+              <div>
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
+                  <h1 className="text-2xl font-semibold tracking-tight text-slate-950">AI 出游路线工作台</h1>
+                  <span className="inline-flex w-fit items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-sm text-slate-500">
+                    {userEmail}
+                  </span>
                 </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge label="模型" value={hasSavedConfig ? "已配置" : "待配置"} tone={hasSavedConfig ? "pine" : "accent"} />
+                <StatusBadge label="行程" value={`${tripSummaries.length} 条`} />
+                <StatusBadge
+                  label="问题"
+                  value={selectedTrip ? `${issueSummary.errors} 错误 / ${issueSummary.warnings} 提醒` : "等待生成"}
+                  tone={issueSummary.errors > 0 ? "accent" : "default"}
+                />
+              </div>
+
+              <p className="text-sm leading-7 text-slate-600">{planningStatus}</p>
+            </div>
+
+            <div className="rounded-[20px] border border-pine/15 bg-slate-50 p-4 xl:w-[420px]">
+              <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-sm font-medium text-slate-500">主操作</p>
                   <h2 className="text-lg font-semibold text-slate-950">开始新的路线规划</h2>
                 </div>
               </div>
-              <p className="mt-2.5 text-sm leading-7 text-slate-600">{planningHint}</p>
-              <div className="mt-2.5 flex flex-wrap gap-2">
+
+              <div className="mt-3 flex flex-wrap gap-2">
                 {planningChecklist.map((item) => (
-                  <span key={item} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600">
+                  <span key={item} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600">
                     {item}
                   </span>
                 ))}
               </div>
-            </div>
 
-            <div className="flex flex-col gap-2 xl:min-w-[260px] xl:items-end">
-              <button
-                type="button"
-                onClick={planTrip}
-                disabled={!canPlan}
-                className="w-full rounded-2xl bg-pine px-5 py-3.5 text-base font-semibold text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60 xl:w-[260px]"
-              >
-                {planningButtonLabel}
-              </button>
-              <p className="text-xs leading-5 text-slate-500">按钮固定在上方，填完核心信息后可以直接开始。</p>
+              <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <button
+                  type="button"
+                  onClick={planTrip}
+                  disabled={!canPlan}
+                  className="w-full rounded-2xl bg-pine px-5 py-3 text-base font-semibold text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60 md:ml-auto md:w-[210px]"
+                >
+                  {planningButtonLabel}
+                </button>
+              </div>
             </div>
           </div>
         </section>
 
-        <div className="grid gap-4 xl:grid-cols-[332px_minmax(0,1fr)]">
+        <div className="grid gap-4 xl:grid-cols-[316px_minmax(0,1fr)]">
           <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
             <section className={panelClass}>
               <SectionHeading
                 icon={<Settings2 className="h-5 w-5" />}
                 title="模型配置"
-                description="只保留最关键的连接参数，先把模型打通。"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => setConfigExpanded((current) => !current)}
+                    className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500 transition hover:border-accent hover:text-accent"
+                  >
+                    {configExpanded ? "收起" : "展开"}
+                    <ChevronDown className={cn("h-4 w-4 transition", configExpanded && "rotate-180")} />
+                  </button>
+                }
               />
 
-              <div className="mt-6 space-y-4">
-                <label className="block space-y-2">
-                  <span className="text-sm font-medium text-slate-600">Base URL</span>
-                  <input
-                    className={fieldClass}
-                    value={config.baseUrl}
-                    onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))}
-                    placeholder="https://api.openai.com/v1"
-                  />
-                  <p className="text-xs leading-5 text-slate-500">
-                    支持基础 URL，也支持完整的 `/chat/completions` 地址，不要填写 `/responses`。
-                  </p>
-                </label>
-
-                <label className="block space-y-2">
-                  <span className="text-sm font-medium text-slate-600">API Key</span>
-                  <input
-                    className={fieldClass}
-                    type="password"
-                    value={config.apiKey}
-                    onChange={(event) => setConfig((current) => ({ ...current, apiKey: event.target.value }))}
-                    placeholder={hasStoredApiKey ? "已保存旧密钥，如需替换再输入新 Key" : "sk-..."}
-                  />
-                  <p className="text-xs leading-5 text-slate-500">
-                    {hasStoredApiKey
-                      ? "当前账号已经保存了 API Key。这里留空会继续使用原来的密钥，只有在更换密钥时才需要重新输入。"
-                      : "首次保存时需要填写 API Key。"}
-                  </p>
-                </label>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-600">Model</span>
-                    <input
-                      className={fieldClass}
-                      value={config.model}
-                      onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}
-                      placeholder="gpt-4.1-mini"
-                    />
-                  </label>
-
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-600">Temperature</span>
-                    <input
-                      className={fieldClass}
-                      type="number"
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      value={config.temperature}
-                      onChange={(event) =>
-                        setConfig((current) => ({
-                          ...current,
-                          temperature: Number(event.target.value)
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-
-                <label className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                  <span>启用 LLM 精修</span>
-                  <input
-                    type="checkbox"
-                    checked={config.enabled}
-                    onChange={(event) => setConfig((current) => ({ ...current, enabled: event.target.checked }))}
-                  />
-                </label>
-              </div>
-
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <button type="button" onClick={testConfig} disabled={isBusy} className={secondaryButtonClass}>
-                  测试连接
-                </button>
-                <button type="button" onClick={saveConfig} disabled={isBusy} className={accentButtonClass}>
-                  保存配置
-                </button>
-              </div>
-
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
-                {configStatus}
+                {configSummary}
               </div>
+
+              {configExpanded ? (
+                <>
+                  <div className="mt-4 space-y-3">
+                    <label className="block space-y-2">
+                      <span className="text-sm font-medium text-slate-600">Base URL</span>
+                      <input
+                        className={fieldClass}
+                        value={config.baseUrl}
+                        onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))}
+                        placeholder="https://api.openai.com/v1"
+                      />
+                    </label>
+
+                    <label className="block space-y-2">
+                      <span className="text-sm font-medium text-slate-600">API Key</span>
+                    <input
+                      className={fieldClass}
+                      type="password"
+                      value={config.apiKey}
+                      onChange={(event) => setConfig((current) => ({ ...current, apiKey: event.target.value }))}
+                      placeholder={hasStoredApiKey ? "留空沿用已保存 Key" : "sk-..."}
+                    />
+                    </label>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block space-y-2">
+                        <span className="text-sm font-medium text-slate-600">Model</span>
+                        <input
+                          className={fieldClass}
+                          value={config.model}
+                          onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}
+                          placeholder="gpt-4.1-mini"
+                        />
+                      </label>
+
+                      <label className="block space-y-2">
+                        <span className="text-sm font-medium text-slate-600">Temperature</span>
+                        <input
+                          className={fieldClass}
+                          type="number"
+                          min={0}
+                          max={2}
+                          step={0.1}
+                          value={config.temperature}
+                          onChange={(event) =>
+                            setConfig((current) => ({
+                              ...current,
+                              temperature: Number(event.target.value)
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+
+                    <label className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-600">
+                      <span>启用 LLM 精修</span>
+                      <input
+                        type="checkbox"
+                        checked={config.enabled}
+                        onChange={(event) => setConfig((current) => ({ ...current, enabled: event.target.checked }))}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <button type="button" onClick={testConfig} disabled={isBusy} className={secondaryButtonClass}>
+                      测试连接
+                    </button>
+                    <button type="button" onClick={saveConfig} disabled={isBusy} className={accentButtonClass}>
+                      保存配置
+                    </button>
+                  </div>
+
+                  <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                    {configStatus}
+                  </div>
+                </>
+              ) : null}
             </section>
 
             <section className={panelClass}>
               <SectionHeading
                 icon={<MapPinned className="h-5 w-5" />}
                 title="新建行程"
-                description="按最常用的顺序填写，生成后会自动进入右侧编辑区。"
               />
 
-              <div className="mt-5 rounded-[20px] border border-pine/15 bg-pine/6 p-4">
-                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-slate-950">先填表单，再点上方主按钮</p>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">这一栏只负责输入需求，减少注意力分散。</p>
-                  </div>
-                  <div className="rounded-full border border-pine/15 bg-white px-3 py-2 text-xs font-medium text-pine">
-                    当前：{tripForm.destination || "未填写目的地"}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-5 space-y-4">
+              <div className="mt-5 space-y-3">
                 <label className="block space-y-2">
                   <span className="text-sm font-medium text-slate-600">目的地</span>
                   <input
@@ -872,7 +856,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                   />
                 </label>
 
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <label className="block space-y-2">
                     <span className="text-sm font-medium text-slate-600">出发日期</span>
                     <input
@@ -901,7 +885,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                   </label>
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <label className="block space-y-2">
                     <span className="text-sm font-medium text-slate-600">同行人数</span>
                     <input
@@ -938,36 +922,6 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                   </label>
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-600">预算</span>
-                    <select
-                      className={fieldClass}
-                      value={tripForm.budget}
-                      onChange={(event) =>
-                        setTripForm((current) => ({
-                          ...current,
-                          budget: event.target.value as TripRequest["budget"]
-                        }))
-                      }
-                    >
-                      <option value="value">省钱优先</option>
-                      <option value="balanced">预算平衡</option>
-                      <option value="premium">舒适优先</option>
-                    </select>
-                  </label>
-
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-600">酒店区域</span>
-                    <input
-                      className={fieldClass}
-                      value={tripForm.hotelArea ?? ""}
-                      onChange={(event) => setTripForm((current) => ({ ...current, hotelArea: event.target.value }))}
-                      placeholder="例如：静安寺附近"
-                    />
-                  </label>
-                </div>
-
                 <label className="block space-y-2">
                   <span className="text-sm font-medium text-slate-600">兴趣标签</span>
                   <div className="flex flex-wrap gap-2">
@@ -997,49 +951,94 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                       );
                     })}
                   </div>
-                  <p className="text-xs leading-5 text-slate-500">至少选择 1 个兴趣标签，模型会据此安排风格。</p>
                 </label>
 
-                <label className="block space-y-2">
-                  <span className="text-sm font-medium text-slate-600">必去景点</span>
-                  <input
-                    className={fieldClass}
-                    value={tripForm.mustVisit.join(", ")}
-                    onChange={(event) =>
-                      setTripForm((current) => ({
-                        ...current,
-                        mustVisit: event.target.value
-                          .split(",")
-                          .map((item) => item.trim())
-                          .filter(Boolean)
-                      }))
-                    }
-                    placeholder="用逗号分隔，例如：岳麓山, 橘子洲"
-                  />
-                </label>
+                <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3">
+                  <button
+                    type="button"
+                    onClick={() => setTripAdvancedExpanded((current) => !current)}
+                    className="flex w-full items-center justify-between gap-3 text-left"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-slate-950">更多偏好</p>
+                    </div>
+                    <ChevronDown className={cn("h-4 w-4 text-slate-500 transition", tripAdvancedExpanded && "rotate-180")} />
+                  </button>
 
-                <label className="block space-y-2">
-                  <span className="text-sm font-medium text-slate-600">补充要求</span>
-                  <textarea
-                    className={textAreaClass}
-                    value={tripForm.notes ?? ""}
-                    onChange={(event) => setTripForm((current) => ({ ...current, notes: event.target.value }))}
-                    placeholder="例如：第一天不要太赶，晚餐想安排在景区附近。"
-                  />
-                </label>
+                  {tripAdvancedExpanded ? (
+                    <div className="mt-4 space-y-3">
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block space-y-2">
+                          <span className="text-sm font-medium text-slate-600">预算</span>
+                          <select
+                            className={fieldClass}
+                            value={tripForm.budget}
+                            onChange={(event) =>
+                              setTripForm((current) => ({
+                                ...current,
+                                budget: event.target.value as TripRequest["budget"]
+                              }))
+                            }
+                          >
+                            <option value="value">省钱优先</option>
+                            <option value="balanced">预算平衡</option>
+                            <option value="premium">舒适优先</option>
+                          </select>
+                        </label>
+
+                        <label className="block space-y-2">
+                          <span className="text-sm font-medium text-slate-600">酒店区域</span>
+                          <input
+                            className={fieldClass}
+                            value={tripForm.hotelArea ?? ""}
+                            onChange={(event) => setTripForm((current) => ({ ...current, hotelArea: event.target.value }))}
+                            placeholder="例如：静安寺附近"
+                          />
+                        </label>
+                      </div>
+
+                      <label className="block space-y-2">
+                        <span className="text-sm font-medium text-slate-600">必去景点</span>
+                        <input
+                          className={fieldClass}
+                          value={tripForm.mustVisit.join(", ")}
+                          onChange={(event) =>
+                            setTripForm((current) => ({
+                              ...current,
+                              mustVisit: event.target.value
+                                .split(",")
+                                .map((item) => item.trim())
+                                .filter(Boolean)
+                            }))
+                          }
+                          placeholder="用逗号分隔，例如：岳麓山, 橘子洲"
+                        />
+                      </label>
+
+                      <label className="block space-y-2">
+                        <span className="text-sm font-medium text-slate-600">补充要求</span>
+                        <textarea
+                          className={textAreaClass}
+                          value={tripForm.notes ?? ""}
+                          onChange={(event) => setTripForm((current) => ({ ...current, notes: event.target.value }))}
+                          placeholder="例如：第一天不要太赶，晚餐想安排在景区附近。"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </section>
           </aside>
 
           <section className="space-y-4">
             <section className={panelClass}>
-              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <SectionHeading
                   icon={<CalendarDays className="h-5 w-5" />}
                   title="历史行程"
-                  description="从这里快速切换已有路线，不用反复返回。"
                 />
-                <div className="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-500">
+                <div className="rounded-full border border-slate-200 bg-slate-50 px-4 py-1.5 text-sm font-medium text-slate-500">
                   共 {tripSummaries.length} 条记录
                 </div>
               </div>
@@ -1049,55 +1048,36 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                   还没有保存的行程。完成一次规划后，这里会自动出现历史记录。
                 </div>
               ) : (
-                <div className="mt-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+                <div className="mt-4 divide-y divide-slate-200">
                   {tripSummaries.map((trip) => {
                     const isSelected = selectedTrip?.id === trip.id;
                     const isLoading = loadingTripId === trip.id;
                     const isDeleting = deletingTripId === trip.id;
 
                     return (
-                      <article
-                        key={trip.id}
-                        className={cn(
-                          "rounded-[20px] border px-4 py-4 transition",
-                          isSelected
-                            ? "border-accent bg-accent/6 shadow-[0_12px_30px_rgba(208,91,50,0.12)]"
-                            : "border-slate-200 bg-slate-50/80 hover:border-accent/25 hover:bg-white"
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-base font-semibold text-slate-950">{trip.destination}</p>
-                            <p className="mt-1 line-clamp-2 text-sm leading-6 text-slate-600">{trip.title}</p>
+                      <article key={trip.id} className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0 md:flex-row md:items-center md:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-base font-semibold text-slate-950">{trip.destination}</p>
+                            <span
+                              className={cn(
+                                "rounded-full border px-2.5 py-1 text-xs font-medium",
+                                isSelected
+                                  ? "border-accent/20 bg-accent/8 text-accent"
+                                  : "border-slate-200 bg-slate-50 text-slate-500"
+                              )}
+                            >
+                              {isSelected ? "当前打开" : `${trip.days} 天`}
+                            </span>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => void deleteTrip(trip.id)}
-                            disabled={isDeleting}
-                            className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500 transition hover:border-red-200 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isDeleting ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                            删除
-                          </button>
+                          <p className="mt-1 truncate text-sm text-slate-600">{trip.title}</p>
+                          <div className="mt-1.5 flex flex-wrap gap-3 text-xs text-slate-500">
+                            <span>出发 {formatDate(trip.startDate)}</span>
+                            <span>更新于 {formatDateTime(trip.updatedAt)}</span>
+                          </div>
                         </div>
 
-                        <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                          <span>出发 {formatDate(trip.startDate)}</span>
-                          <span>{trip.days} 天</span>
-                          <span>更新于 {formatDateTime(trip.updatedAt)}</span>
-                        </div>
-
-                        <div className="mt-4 flex items-center justify-between gap-3">
-                          <span
-                            className={cn(
-                              "rounded-full border px-3 py-1 text-xs font-medium",
-                              isSelected
-                                ? "border-accent/20 bg-white text-accent"
-                                : "border-slate-200 bg-white text-slate-500"
-                            )}
-                          >
-                            {isSelected ? "当前打开" : "历史行程"}
-                          </span>
+                        <div className="flex items-center gap-2 md:shrink-0">
                           <button
                             type="button"
                             onClick={() => void loadTrip(trip.id)}
@@ -1111,6 +1091,15 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                           >
                             {isLoading ? "加载中..." : "打开"}
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => void deleteTrip(trip.id)}
+                            disabled={isDeleting}
+                            className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-500 transition hover:border-red-200 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isDeleting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                            删除
+                          </button>
                         </div>
                       </article>
                     );
@@ -1123,20 +1112,17 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
               <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                 <div>
                   <p className="text-sm font-medium uppercase tracking-[0.18em] text-slate-400">Workspace</p>
-                  <h2 className="mt-2 text-2xl font-semibold text-slate-950">
+                  <h2 className="mt-1.5 text-2xl font-semibold text-slate-950">
                     {selectedTrip ? selectedTrip.title : "当前编辑区"}
                   </h2>
-                  <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-500">
-                    {selectedTrip
-                      ? "拖拽卡片可以调整顺序，锁定关键地点后再重排未锁定项目。"
-                      : "生成新行程后，右侧会显示每天安排、问题提醒和保存操作。"}
-                  </p>
                 </div>
 
-                <div className="flex flex-wrap gap-3">
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                    {issueSummary.errors} 个错误 · {issueSummary.warnings} 个提醒
-                  </div>
+                <div className="flex flex-wrap gap-2">
+                  <StatusBadge
+                    label="提醒"
+                    value={selectedTrip ? `${issueSummary.errors} 错误 / ${issueSummary.warnings} 提醒` : "等待生成"}
+                    tone={issueSummary.errors > 0 ? "accent" : "default"}
+                  />
                   <button
                     type="button"
                     onClick={saveEdits}
@@ -1154,116 +1140,83 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
               </div>
 
               {!selectedTrip ? (
-                <div className="mt-5 grid gap-3 lg:grid-cols-3">
-                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-5 py-5">
-                    <p className="text-sm font-semibold text-slate-950">先连接模型</p>
-                    <p className="mt-2 text-sm leading-7 text-slate-500">填写 Base URL、Key 和模型名，确保测试连接成功。</p>
-                  </div>
-                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-5 py-5">
-                    <p className="text-sm font-semibold text-slate-950">再填写需求</p>
-                    <p className="mt-2 text-sm leading-7 text-slate-500">目的地、日期、天数和兴趣标签是最核心的输入项。</p>
-                  </div>
-                  <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-5 py-5">
-                    <p className="text-sm font-semibold text-slate-950">最后直接编辑</p>
-                    <p className="mt-2 text-sm leading-7 text-slate-500">生成后就在这里拖拽、锁定、检查问题并保存。</p>
-                  </div>
+                <div className="mt-5 rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-5 py-8 text-center text-sm text-slate-500">
+                  生成后在这里编辑行程。
                 </div>
               ) : (
-                <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
-                  <div className="space-y-4">
-                    <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
-                        <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">出发日期</p>
-                        <p className="mt-2 text-base font-semibold text-slate-950">{formatDate(selectedTrip.startDate)}</p>
-                      </div>
-                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
-                        <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">旅行人数</p>
-                        <p className="mt-2 text-base font-semibold text-slate-950">{selectedTrip.request.travelers} 人</p>
-                      </div>
-                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
-                        <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">行程节奏</p>
-                        <p className="mt-2 text-base font-semibold text-slate-950">{formatPace(selectedTrip.request.pace)}</p>
-                      </div>
-                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
-                        <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">候选点</p>
-                        <p className="mt-2 text-base font-semibold text-slate-950">
-                          {selectedTrip.itinerary.metadata.candidateCount ?? 0} 个
-                        </p>
-                      </div>
+                <>
+                  <div className="mt-5 grid gap-3 md:grid-cols-2 2xl:grid-cols-5">
+                    <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">出发日期</p>
+                      <p className="mt-1.5 text-base font-semibold text-slate-950">{formatDate(selectedTrip.startDate)}</p>
                     </div>
-
-                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                      <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
-                        {selectedTrip.itinerary.days.map((day) => (
-                          <DayColumn key={day.date} day={day} onToggleLock={handleToggleLock} />
-                        ))}
-                      </div>
-                    </DndContext>
+                    <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">旅行人数</p>
+                      <p className="mt-1.5 text-base font-semibold text-slate-950">{selectedTrip.request.travelers} 人</p>
+                    </div>
+                    <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">行程节奏</p>
+                      <p className="mt-1.5 text-base font-semibold text-slate-950">{formatPace(selectedTrip.request.pace)}</p>
+                    </div>
+                    <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">预算偏好</p>
+                      <p className="mt-1.5 text-base font-semibold text-slate-950">{formatBudget(selectedTrip.request.budget)}</p>
+                    </div>
+                    <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">候选点</p>
+                      <p className="mt-1.5 text-base font-semibold text-slate-950">
+                        {selectedTrip.itinerary.metadata.candidateCount ?? 0} 个
+                      </p>
+                    </div>
                   </div>
 
-                  <aside className="space-y-4">
-                    <div className="rounded-[26px] border border-slate-200 bg-slate-50/90 p-5">
-                      <div className="flex items-center gap-2">
-                        <Sparkles className="h-5 w-5 text-accent" />
-                        <h3 className="text-base font-semibold text-slate-950">需求摘要</h3>
-                      </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {selectedTripChips.map((item) => (
+                      <span key={item} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600">
+                        {item}
+                      </span>
+                    ))}
+                  </div>
 
-                      <div className="mt-4 space-y-4 text-sm leading-6 text-slate-600">
-                        <div>
-                          <p className="font-medium text-slate-950">目的地</p>
-                          <p>{selectedTrip.request.destination}</p>
-                        </div>
-                        <div>
-                          <p className="font-medium text-slate-950">兴趣标签</p>
-                          <p>{selectedTrip.request.interests.join(" / ")}</p>
-                        </div>
-                        <div>
-                          <p className="font-medium text-slate-950">预算偏好</p>
-                          <p>{formatBudget(selectedTrip.request.budget)}</p>
-                        </div>
-                        <div>
-                          <p className="font-medium text-slate-950">候选点来源</p>
-                          <p>{formatCandidateSource(selectedTrip.itinerary.metadata.candidateSource)}</p>
-                        </div>
-                        {selectedTrip.request.mustVisit.length > 0 ? (
-                          <div>
-                            <p className="font-medium text-slate-950">必去景点</p>
-                            <p>{selectedTrip.request.mustVisit.join(" / ")}</p>
-                          </div>
-                        ) : null}
-                        {selectedTrip.request.hotelArea ? (
-                          <div>
-                            <p className="font-medium text-slate-950">酒店区域</p>
-                            <p>{selectedTrip.request.hotelArea}</p>
-                          </div>
-                        ) : null}
-                        {selectedTrip.request.notes ? (
-                          <div>
-                            <p className="font-medium text-slate-950">补充要求</p>
-                            <p>{selectedTrip.request.notes}</p>
-                          </div>
-                        ) : null}
-                        {selectedTrip.itinerary.metadata.betaNotice ? (
-                          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-700">
-                            {selectedTrip.itinerary.metadata.betaNotice}
-                          </div>
-                        ) : null}
-                      </div>
+                  <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                    <div className="mt-4 grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
+                      {selectedTrip.itinerary.days.map((day) => (
+                        <DayColumn key={day.date} day={day} onToggleLock={handleToggleLock} />
+                      ))}
                     </div>
+                  </DndContext>
 
-                    <div className="rounded-[26px] border border-slate-200 bg-slate-50/90 p-5">
+                  <div className={cn("mt-4 grid gap-4", workspaceNotes.length > 0 && "lg:grid-cols-[minmax(0,1fr)_360px]")}>
+                    {workspaceNotes.length > 0 ? (
+                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="h-5 w-5 text-accent" />
+                          <h3 className="text-base font-semibold text-slate-950">规划备注</h3>
+                        </div>
+
+                        <div className="mt-3 space-y-3 text-sm leading-6 text-slate-600">
+                          {workspaceNotes.map((note) => (
+                            <div key={note} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                              {note}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4">
                       <div className="flex items-center gap-2">
                         <AlertTriangle className="h-5 w-5 text-accent" />
                         <h3 className="text-base font-semibold text-slate-950">问题提醒</h3>
                       </div>
 
-                      <div className="mt-4 space-y-3">
+                      <div className="mt-3 space-y-3">
                         {activeIssues.length > 0 ? (
                           activeIssues.map((issue, index) => (
                             <div
                               key={`${issue.code}-${index}`}
                               className={cn(
-                                "rounded-2xl border px-4 py-4 text-sm leading-6",
+                                "rounded-2xl border px-4 py-3 text-sm leading-6",
                                 issue.severity === "error"
                                   ? "border-red-200 bg-red-50 text-red-700"
                                   : "border-amber-200 bg-amber-50 text-amber-700"
@@ -1280,8 +1233,8 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                         )}
                       </div>
                     </div>
-                  </aside>
-                </div>
+                  </div>
+                </>
               )}
             </section>
           </section>

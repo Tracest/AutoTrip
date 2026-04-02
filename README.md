@@ -13,6 +13,7 @@ AutoTrip 是一个单用户、自托管的 AI 出游路线工作台。
 - 规则预规划 + LLM 精修 + 校验修复的 4 段式规划流水线
 - 无地图供应商时支持 LLM 候选点回退，并在界面中显示候选点来源
 - 行程工作台支持拖拽排序、锁定项目、保存编辑、重排未锁定项目
+- 历史行程支持打开与删除
 - Prisma + Postgres 持久化存储
 - Vitest 单元/集成测试与 Playwright e2e 样例
 
@@ -102,6 +103,17 @@ npm run dev
 - 也支持直接填写完整的 `/chat/completions` 地址
 - 不要填写 `/responses` 路径；当前项目只按 `OpenAI-compatible chat/completions` 协议工作
 - 如果上游供应商响应较慢，可以调大 `LLM_PLANNING_TIMEOUT_MS`
+- API Key 已在服务端加密存储；后续保持输入框为空时会沿用已保存的密钥
+
+## 当前工作台
+
+当前首页工作流是：
+
+1. 顶部右侧主按钮直接发起规划
+2. 左侧填写核心需求；模型配置和“更多偏好”都支持折叠
+3. 右侧查看历史行程、打开或删除旧记录
+4. 在工作区里拖拽、锁定、保存编辑或重排未锁定项目
+5. 问题提醒只显示当前工作区的实时结果，不再混入旧问题
 
 ## 主要 API
 
@@ -111,6 +123,7 @@ npm run dev
 - `POST /api/settings/llm/test`
 - `POST /api/trips/plan`
 - `GET /api/trips/:id`
+- `DELETE /api/trips/:id`
 - `PATCH /api/trips/:id/items`
 - `POST /api/trips/:id/replan`
 

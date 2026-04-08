@@ -23,6 +23,7 @@ export const llmSettingsResponseSchema = z.object({
   apiStyle: z.literal("openai").optional(),
   enabled: z.boolean().optional(),
   hasApiKey: z.boolean().optional(),
+  apiKeyOptional: z.boolean().optional(),
   configured: z.boolean()
 });
 

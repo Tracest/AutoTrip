@@ -1,9 +1,14 @@
-import { llmTestSchema } from "@/lib/schemas/llm";
-import { testOpenAICompatibleConnection } from "@/lib/llm/openai-compatible";
-import { jsonError, jsonOk } from "@/lib/utils/http";
+import { z } from "zod";
 import { requireAdminUser } from "@/lib/auth/guards";
+import { listAvailableModels } from "@/lib/llm/openai-compatible";
 import { getDefaultApiKeyForBaseUrl } from "@/lib/llm/provider-utils";
 import { decryptString } from "@/lib/security/crypto";
+import { jsonError, jsonOk } from "@/lib/utils/http";
+
+const modelListSchema = z.object({
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional().default("")
+});
 
 export async function POST(request: Request) {
   const user = await requireAdminUser();
@@ -12,27 +17,22 @@ export async function POST(request: Request) {
   }
 
   try {
-    const payload = llmTestSchema.parse(await request.json());
-    const fallbackApiKey = getDefaultApiKeyForBaseUrl(payload.baseUrl);
+    const payload = modelListSchema.parse(await request.json());
     const savedKeyMatchesBaseUrl = user.llmConfig?.baseUrl === payload.baseUrl;
     const apiKey =
       payload.apiKey.trim().length > 0
         ? payload.apiKey
         : savedKeyMatchesBaseUrl && user.llmConfig?.apiKeyEncrypted
           ? decryptString(user.llmConfig.apiKeyEncrypted)
-          : fallbackApiKey;
+          : getDefaultApiKeyForBaseUrl(payload.baseUrl);
 
-    if (!apiKey) {
-      return jsonError("API key is required to test the model connection unless you are using local Ollama.", 400);
-    }
-
-    const result = await testOpenAICompatibleConnection({
-      ...payload,
+    const result = await listAvailableModels({
+      baseUrl: payload.baseUrl,
       apiKey
     });
+
     return jsonOk(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Connection test failed.";
-    return jsonError(message, 400);
+    return jsonError("Unable to load available models.", 400, error instanceof Error ? error.message : error);
   }
 }

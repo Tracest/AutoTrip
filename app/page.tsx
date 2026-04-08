@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db/prisma";
 import { requireAdminUser } from "@/lib/auth/guards";
+import { isLikelyOllamaBaseUrl } from "@/lib/llm/provider-utils";
 import { serializeTripSummary } from "@/lib/trips/serialization";
 import type { LlmSettingsResponse } from "@/lib/schemas/llm";
 import { DashboardClient } from "@/components/dashboard-client";
@@ -29,7 +30,8 @@ export default async function HomePage() {
       apiStyle: "openai",
       temperature: user.llmConfig.temperature,
       enabled: user.llmConfig.enabled,
-      hasApiKey: true
+      hasApiKey: !isLikelyOllamaBaseUrl(user.llmConfig.baseUrl),
+      apiKeyOptional: isLikelyOllamaBaseUrl(user.llmConfig.baseUrl)
     }
   : {
       configured: false

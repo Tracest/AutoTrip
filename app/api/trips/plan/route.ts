@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/prisma";
 import { requireAdminUser } from "@/lib/auth/guards";
+import { shouldPreferChineseOutput } from "@/lib/planning/destination";
 import { tripRequestSchema } from "@/lib/schemas/trip";
 import { planTrip } from "@/lib/planning/engine";
 import { jsonError } from "@/lib/utils/http";
@@ -74,7 +75,9 @@ export async function POST(request: Request) {
         send({
           type: "progress",
           stage: "persist",
-          message: "Trip saved. Opening the editable itinerary workspace."
+          message: shouldPreferChineseOutput(parsedRequest.destination)
+            ? "行程已保存，正在打开可编辑工作区。"
+            : "Trip saved. Opening the editable itinerary workspace."
         });
 
         send({

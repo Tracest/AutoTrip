@@ -30,6 +30,7 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { DEFAULT_OLLAMA_BASE_URL, isLikelyOllamaBaseUrl } from "@/lib/llm/provider-utils";
 import { repairItinerary } from "@/lib/planning/validator";
 import type {
   Itinerary,
@@ -57,6 +58,11 @@ type StreamEvent =
 type ApiError = {
   error?: string;
   details?: string;
+};
+
+type ModelsResponse = {
+  models: string[];
+  endpoint?: string;
 };
 
 type SectionHeadingProps = {
@@ -143,8 +149,10 @@ function formatCandidateSource(source?: string) {
   switch (source) {
     case "amap":
       return "高德地图";
+    case "wikimedia":
+      return "联网检索（Wikimedia）";
     case "llm-fallback":
-      return "LLM 候选点回退";
+      return "本地模型候选点 + 规则排程";
     case "mock":
       return "占位 Mock 数据";
     default:
@@ -397,15 +405,18 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [tripForm, setTripForm] = useState<TripRequest>(defaultTripRequest);
   const [config, setConfig] = useState({
-    baseUrl: initialConfig.baseUrl ?? "",
+    baseUrl: initialConfig.baseUrl ?? DEFAULT_OLLAMA_BASE_URL,
     apiKey: "",
     model: initialConfig.model ?? "",
     temperature: initialConfig.temperature ?? 0.3,
     enabled: initialConfig.enabled ?? true
   });
   const [hasSavedConfig, setHasSavedConfig] = useState(initialConfig.configured);
+  const [lastSavedBaseUrl, setLastSavedBaseUrl] = useState(initialConfig.baseUrl ?? "");
   const [hasStoredApiKey, setHasStoredApiKey] = useState(initialConfig.hasApiKey ?? false);
-  const [configStatus, setConfigStatus] = useState(initialConfig.configured ? "模型已配置，可以直接开始规划。" : "先填写模型地址和模型名。");
+  const [configStatus, setConfigStatus] = useState(
+    initialConfig.configured ? "模型已配置，可以直接开始规划。" : "默认推荐本地 Ollama。填写模型名后保存即可开始规划。"
+  );
   const [planningStatus, setPlanningStatus] = useState("先完成模型配置，然后填写需求并开始规划。");
   const [configExpanded, setConfigExpanded] = useState(!initialConfig.configured);
   const [tripAdvancedExpanded, setTripAdvancedExpanded] = useState(false);
@@ -415,13 +426,21 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   const [deletingTripId, setDeletingTripId] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [workspaceIssues, setWorkspaceIssues] = useState<PlanningIssue[]>([]);
+  const [availableModels, setAvailableModels] = useState<string[]>(
+    initialConfig.model ? [initialConfig.model] : []
+  );
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [modelLookupMessage, setModelLookupMessage] = useState("");
 
   const activeIssues = selectedTrip ? workspaceIssues : [];
   const issueSummary = {
     warnings: activeIssues.filter((issue) => issue.severity === "warning").length,
     errors: activeIssues.filter((issue) => issue.severity === "error").length
   };
-  const canPlan = tripForm.destination.trim().length > 0 && tripForm.interests.length > 0 && !isBusy;
+  const usingLocalOllama = isLikelyOllamaBaseUrl(config.baseUrl);
+  const canReuseSavedApiKey = hasStoredApiKey && lastSavedBaseUrl === config.baseUrl;
+  const modelChoices = Array.from(new Set([...availableModels, ...(config.model ? [config.model] : [])]));
+  const canPlan = tripForm.destination.trim().length > 0 && tripForm.interests.length > 0 && !isBusy && hasSavedConfig;
   const planningButtonLabel = isBusy ? "规划中..." : "开始规划路线";
   const planningChecklist = [
     `目的地 ${tripForm.destination || "未填写"}`,
@@ -430,8 +449,12 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     tripForm.interests.length > 0 ? tripForm.interests.join(" / ") : "未选兴趣"
   ];
   const configSummary = hasSavedConfig
-    ? `${config.model || "未填写模型"} · ${config.baseUrl || "未填写地址"}`
-    : "尚未完成模型配置";
+    ? usingLocalOllama
+      ? `本地 Ollama · ${config.model || "未填写模型"}`
+      : `${config.model || "未填写模型"} · ${config.baseUrl || "未填写地址"}`
+    : usingLocalOllama
+      ? `默认推荐本地 Ollama · ${config.baseUrl || DEFAULT_OLLAMA_BASE_URL}`
+      : "尚未完成模型配置";
 
   useEffect(() => {
     if (initialTrips[0]) {
@@ -439,6 +462,22 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!configExpanded || !usingLocalOllama) {
+      if (!usingLocalOllama) {
+        setModelLookupMessage("");
+      }
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void loadAvailableModels({ silent: true });
+    }, 250);
+
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configExpanded, config.baseUrl]);
 
   async function loadTrip(tripId: string) {
     setLoadingTripId(tripId);
@@ -490,6 +529,59 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setPlanningStatus("已删除该历史行程。");
   }
 
+  async function loadAvailableModels(options?: { silent?: boolean }) {
+    if (!usingLocalOllama || !config.baseUrl.trim()) {
+      setAvailableModels((current) => Array.from(new Set([...current, ...(config.model ? [config.model] : [])])));
+      setModelLookupMessage("");
+      return;
+    }
+
+    setIsLoadingModels(true);
+    if (!options?.silent) {
+      setModelLookupMessage("正在读取本地 Ollama 模型...");
+    }
+
+    const response = await fetch("/api/settings/llm/models", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey
+      })
+    });
+    const payload = (await response.json().catch(() => null)) as ModelsResponse | ApiError | null;
+    setIsLoadingModels(false);
+
+    if (!response.ok || !payload || !("models" in payload)) {
+      setModelLookupMessage(getApiErrorMessage(payload as ApiError | null, "无法读取本地模型列表。"));
+      return;
+    }
+
+    setAvailableModels(payload.models);
+    setModelLookupMessage(
+      payload.models.length > 0
+        ? `已发现 ${payload.models.length} 个本地模型，可直接点选填入。`
+        : "未发现本地模型。先运行 ollama pull qwen3:8b，再回来刷新。"
+    );
+
+    if (!config.model && payload.models[0]) {
+      setConfig((current) => (current.model ? current : { ...current, model: payload.models[0] }));
+    }
+  }
+
+  function applyLocalPreset(mode: "fast" | "grounded") {
+    setConfig((current) => ({
+      ...current,
+      baseUrl: DEFAULT_OLLAMA_BASE_URL,
+      model: mode === "fast" ? "qwen2.5:3b" : "deepseek-r1:8b",
+      temperature: 0.2,
+      enabled: true
+    }));
+    setConfigStatus(mode === "fast" ? "已应用本地快速模式推荐配置。" : "已应用本地高质量模式推荐配置。");
+  }
+
   async function saveConfig() {
     setIsBusy(true);
     const response = await fetch("/api/settings/llm", {
@@ -508,15 +600,20 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     }
 
     setHasSavedConfig(true);
-    setHasStoredApiKey(hasStoredApiKey || config.apiKey.trim().length > 0);
+    setLastSavedBaseUrl(config.baseUrl);
+    setHasStoredApiKey(!usingLocalOllama && (hasStoredApiKey || config.apiKey.trim().length > 0));
     setConfig((current) => ({ ...current, apiKey: "" }));
     setConfigExpanded(false);
-    setConfigStatus("模型配置已保存。API Key 已安全存储，后续留空即可沿用。");
+    setConfigStatus(
+      usingLocalOllama
+        ? "本地 Ollama 配置已保存。后续将直接使用本机模型。"
+        : "模型配置已保存。API Key 已安全存储，后续留空即可沿用。"
+    );
   }
 
   async function testConfig() {
     setIsBusy(true);
-    setConfigStatus("正在测试模型连接...");
+    setConfigStatus(usingLocalOllama ? "正在测试本地 Ollama 连接..." : "正在测试模型连接...");
     const response = await fetch("/api/settings/llm/test", {
       method: "POST",
       headers: {
@@ -528,7 +625,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setIsBusy(false);
     setConfigStatus(
       response.ok
-        ? `连接成功，模型返回：${payload.preview ?? "ok"}${payload.endpoint ? ` · ${payload.endpoint}` : ""}`
+        ? `${usingLocalOllama ? "本地 Ollama 连接成功" : "连接成功"}：${payload.preview ?? "ok"}${payload.endpoint ? ` · ${payload.endpoint}` : ""}`
         : getApiErrorMessage(payload, "连接失败。")
     );
   }
@@ -763,24 +860,72 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                 <>
                   <div className="mt-4 space-y-3">
                     <label className="block space-y-2">
-                      <span className="text-sm font-medium text-slate-600">Base URL</span>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-slate-600">Base URL</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConfig((current) => ({
+                              ...current,
+                              baseUrl: DEFAULT_OLLAMA_BASE_URL
+                            }))
+                          }
+                          className="text-xs font-medium text-accent transition hover:opacity-80"
+                        >
+                          使用本地 Ollama
+                        </button>
+                      </div>
                       <input
                         className={fieldClass}
                         value={config.baseUrl}
                         onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))}
-                        placeholder="https://api.openai.com/v1"
+                        placeholder={DEFAULT_OLLAMA_BASE_URL}
                       />
                     </label>
 
+                    {usingLocalOllama ? (
+                      <div className="rounded-2xl border border-accent/15 bg-accent/5 px-4 py-3 text-sm leading-6 text-slate-600">
+                        <p className="font-medium text-slate-900">已切换到本地 Ollama 模式</p>
+                        <p className="mt-1">本地模式无需 API Key。请先确保已经运行 `ollama serve`，并至少拉取一个模型。</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          经验上 `qwen2.5:3b` 更快，`deepseek-r1:8b` 候选点通常更像真，但规划会更慢。
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => applyLocalPreset("fast")}
+                            className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-accent hover:text-accent"
+                          >
+                            推荐快速模式
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyLocalPreset("grounded")}
+                            className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-accent hover:text-accent"
+                          >
+                            推荐高质量模式
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
                     <label className="block space-y-2">
-                      <span className="text-sm font-medium text-slate-600">API Key</span>
-                    <input
-                      className={fieldClass}
-                      type="password"
-                      value={config.apiKey}
-                      onChange={(event) => setConfig((current) => ({ ...current, apiKey: event.target.value }))}
-                      placeholder={hasStoredApiKey ? "留空沿用已保存 Key" : "sk-..."}
-                    />
+                      <span className="text-sm font-medium text-slate-600">
+                        API Key {usingLocalOllama ? "（本地 Ollama 可留空）" : ""}
+                      </span>
+                      <input
+                        className={fieldClass}
+                        type="password"
+                        value={config.apiKey}
+                        onChange={(event) => setConfig((current) => ({ ...current, apiKey: event.target.value }))}
+                        placeholder={
+                          usingLocalOllama
+                            ? "本地 Ollama 可留空"
+                            : canReuseSavedApiKey
+                              ? "留空沿用已保存 Key"
+                              : "sk-..."
+                        }
+                      />
                     </label>
 
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -790,7 +935,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                           className={fieldClass}
                           value={config.model}
                           onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}
-                          placeholder="gpt-4.1-mini"
+                          placeholder={usingLocalOllama ? "例如：qwen3:8b" : "gpt-4.1-mini"}
                         />
                       </label>
 
@@ -814,13 +959,56 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                     </div>
 
                     <label className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-600">
-                      <span>启用 LLM 精修</span>
+                      <span>启用模型规划与精修</span>
                       <input
                         type="checkbox"
                         checked={config.enabled}
                         onChange={(event) => setConfig((current) => ({ ...current, enabled: event.target.checked }))}
                       />
                     </label>
+
+                    {usingLocalOllama ? (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium text-slate-900">本地模型</p>
+                          <button
+                            type="button"
+                            onClick={() => void loadAvailableModels()}
+                            disabled={isLoadingModels}
+                            className="text-xs font-medium text-accent transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isLoadingModels ? "读取中..." : "刷新列表"}
+                          </button>
+                        </div>
+
+                        {modelChoices.length > 0 ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {modelChoices.map((model) => {
+                              const active = config.model === model;
+                              return (
+                                <button
+                                  key={model}
+                                  type="button"
+                                  onClick={() => setConfig((current) => ({ ...current, model }))}
+                                  className={cn(
+                                    "rounded-full border px-3 py-1.5 text-xs font-medium transition",
+                                    active
+                                      ? "border-accent bg-accent/10 text-accent"
+                                      : "border-slate-200 bg-white text-slate-600 hover:border-accent/35 hover:text-accent"
+                                  )}
+                                >
+                                  {model}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+
+                        <p className="mt-3 text-xs text-slate-500">
+                          {modelLookupMessage || "如果还没模型，先运行 ollama pull qwen3:8b。"}
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">

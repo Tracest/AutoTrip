@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  listAvailableModels,
   requestStructuredJson,
   resolveChatCompletionsUrl,
   testOpenAICompatibleConnection
@@ -83,6 +84,65 @@ describe("openai compatible client", () => {
       ok: true,
       label: "trip"
     });
+  });
+
+  it("requests json mode for local Ollama structured output", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  ok: true
+                })
+              }
+            }
+          ]
+        }),
+        { status: 200 }
+      )
+    ) as typeof fetch;
+
+    await requestStructuredJson({
+      baseUrl: "http://127.0.0.1:11434/v1",
+      apiKey: "",
+      model: "qwen3:8b",
+      temperature: 0.2,
+      systemPrompt: "Return JSON",
+      userPrompt: "Return {\"ok\":true}",
+      schema: z.object({
+        ok: z.boolean()
+      })
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:11434/v1/chat/completions",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer ollama"
+        }),
+        body: expect.stringContaining("\"response_format\":{\"type\":\"json_object\"}")
+      })
+    );
+  });
+
+  it("lists local Ollama models from the tags endpoint", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          models: [{ name: "qwen3:8b" }, { name: "llama3.1:8b" }]
+        }),
+        { status: 200 }
+      )
+    ) as typeof fetch;
+
+    const result = await listAvailableModels({
+      baseUrl: "http://127.0.0.1:11434/v1"
+    });
+
+    expect(result.models).toEqual(["llama3.1:8b", "qwen3:8b"]);
+    expect(result.endpoint).toBe("http://127.0.0.1:11434/api/tags");
   });
 
   it("retries once on a retryable upstream failure", async () => {

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/prisma";
 import { requireAdminUser } from "@/lib/auth/guards";
+import { getDefaultApiKeyForBaseUrl, isLikelyOllamaBaseUrl } from "@/lib/llm/provider-utils";
 import { llmSettingsSchema, type LlmSettingsResponse } from "@/lib/schemas/llm";
 import { encryptString } from "@/lib/security/crypto";
 import { jsonError, jsonOk } from "@/lib/utils/http";
@@ -10,6 +11,7 @@ export async function GET() {
     return jsonError("Unauthorized.", 401);
   }
 
+  const apiKeyOptional = user.llmConfig ? isLikelyOllamaBaseUrl(user.llmConfig.baseUrl) : false;
   const config: LlmSettingsResponse = user.llmConfig
     ? {
         configured: true,
@@ -18,10 +20,11 @@ export async function GET() {
         apiStyle: "openai",
         temperature: user.llmConfig.temperature,
         enabled: user.llmConfig.enabled,
-        hasApiKey: true
+        hasApiKey: !apiKeyOptional,
+        apiKeyOptional
       }
     : {
-        configured: false
+      configured: false
       };
 
   return jsonOk(config);
@@ -35,13 +38,19 @@ export async function PUT(request: Request) {
 
   try {
     const payload = llmSettingsSchema.parse(await request.json());
+    const fallbackApiKey = getDefaultApiKeyForBaseUrl(payload.baseUrl);
+    const savedKeyMatchesBaseUrl = user.llmConfig?.baseUrl === payload.baseUrl;
     const encryptedKey =
       payload.apiKey.trim().length > 0
         ? encryptString(payload.apiKey)
-        : user.llmConfig?.apiKeyEncrypted;
+        : savedKeyMatchesBaseUrl
+          ? user.llmConfig?.apiKeyEncrypted
+          : fallbackApiKey
+            ? encryptString(fallbackApiKey)
+            : undefined;
 
     if (!encryptedKey) {
-      return jsonError("API key is required the first time you save the LLM settings.", 400);
+      return jsonError("API key is required the first time you save the LLM settings unless you are using local Ollama.", 400);
     }
 
     const updated = await prisma.llmProviderConfig.upsert({
@@ -70,11 +79,12 @@ export async function PUT(request: Request) {
     return jsonOk({
       configured: true,
       baseUrl: updated.baseUrl,
-      model: updated.model,
-      temperature: updated.temperature,
-      apiStyle: "openai",
-      enabled: updated.enabled,
-      hasApiKey: true
+        model: updated.model,
+        temperature: updated.temperature,
+        apiStyle: "openai",
+        enabled: updated.enabled,
+        hasApiKey: !isLikelyOllamaBaseUrl(updated.baseUrl),
+        apiKeyOptional: isLikelyOllamaBaseUrl(updated.baseUrl)
     });
   } catch (error) {
     return jsonError("Unable to save LLM settings.", 400, error instanceof Error ? error.message : error);

@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  isSupportedPlanningDestination,
+  resolveSupportedPlanningDestination,
+  SUPPORTED_DESTINATION_COUNT
+} from "@/lib/planning/supported-destinations";
 
 export const paceSchema = z.enum(["easy", "balanced", "packed"]);
 export const budgetSchema = z.enum(["value", "balanced", "premium"]);
@@ -16,12 +21,42 @@ export const tripRequestSchema = z.object({
   notes: z.string().optional()
 });
 
+export const planningDestinationSchema = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") {
+      return value;
+    }
+
+    const trimmed = value.trim();
+    return resolveSupportedPlanningDestination(trimmed) ?? trimmed;
+  },
+  z
+    .string()
+    .min(1)
+    .refine(isSupportedPlanningDestination, {
+      message: `Destination is not supported yet. Please choose one of the ${SUPPORTED_DESTINATION_COUNT} supported cities.`
+    })
+);
+
+export const planningTripRequestSchema = tripRequestSchema.extend({
+  destination: planningDestinationSchema
+});
+
 export const planningIssueSchema = z.object({
   severity: z.enum(["warning", "error"]),
   code: z.string(),
   message: z.string(),
   source: z.string(),
   suggestion: z.string().optional()
+});
+
+export const poiImageSchema = z.object({
+  url: z.string().url(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  alt: z.string().min(1),
+  sourcePageUrl: z.string().url().optional(),
+  provider: z.literal("wikimedia")
 });
 
 export const poiSchema = z.object({
@@ -34,7 +69,9 @@ export const poiSchema = z.object({
   latitude: z.number(),
   longitude: z.number(),
   recommendedDurationMinutes: z.number().int().min(30).max(360).default(90),
-  openingHoursText: z.string().optional()
+  openingHoursText: z.string().optional(),
+  sourcePageUrl: z.string().url().optional(),
+  image: poiImageSchema.optional()
 });
 
 const flexibleNumberSchema = z.preprocess((value) => {
@@ -55,7 +92,9 @@ export const relaxedPoiSchema = z.object({
   latitude: flexibleNumberSchema.optional(),
   longitude: flexibleNumberSchema.optional(),
   recommendedDurationMinutes: z.number().int().min(30).max(360).optional(),
-  openingHoursText: z.string().optional()
+  openingHoursText: z.string().optional(),
+  sourcePageUrl: z.string().url().optional(),
+  image: poiImageSchema.optional()
 });
 
 export const itineraryItemSchema = z.object({
@@ -145,6 +184,7 @@ export const tripDetailSchema = tripSummarySchema.extend({
 
 export type TripRequest = z.infer<typeof tripRequestSchema>;
 export type PlanningIssue = z.infer<typeof planningIssueSchema>;
+export type PoiImage = z.infer<typeof poiImageSchema>;
 export type Poi = z.infer<typeof poiSchema>;
 export type ItineraryItem = z.infer<typeof itineraryItemSchema>;
 export type ItineraryDay = z.infer<typeof itineraryDaySchema>;

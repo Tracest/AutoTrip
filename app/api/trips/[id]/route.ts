@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/prisma";
 import { requireAdminUser } from "@/lib/auth/guards";
+import { enrichItineraryPoiImages } from "@/lib/planning/poi-images";
 import { jsonError, jsonOk } from "@/lib/utils/http";
 import { serializeTripDetail } from "@/lib/trips/serialization";
 
@@ -12,7 +13,7 @@ type Context = {
 export async function GET(_request: Request, context: Context) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   const trip = await prisma.trip.findFirst({
@@ -23,16 +24,22 @@ export async function GET(_request: Request, context: Context) {
   });
 
   if (!trip) {
-    return jsonError("Trip not found.", 404);
+    return jsonError("未找到该行程。", 404);
   }
 
-  return jsonOk(serializeTripDetail(trip));
+  const detail = serializeTripDetail(trip);
+  const itinerary = await enrichItineraryPoiImages(detail.itinerary);
+
+  return jsonOk({
+    ...detail,
+    itinerary
+  });
 }
 
 export async function DELETE(_request: Request, context: Context) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   const deleted = await prisma.trip.deleteMany({
@@ -43,7 +50,7 @@ export async function DELETE(_request: Request, context: Context) {
   });
 
   if (deleted.count === 0) {
-    return jsonError("Trip not found.", 404);
+    return jsonError("未找到该行程。", 404);
   }
 
   return jsonOk({

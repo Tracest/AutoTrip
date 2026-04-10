@@ -21,6 +21,19 @@ type CompletionOptions<T extends z.ZodTypeAny> = {
   retries?: number;
 };
 
+export type ChatCompletionTool = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: (args: unknown) => Promise<unknown>;
+};
+
+type ToolCompletionOptions<T extends z.ZodTypeAny> = CompletionOptions<T> & {
+  tools: ChatCompletionTool[];
+  maxSteps?: number;
+  requireToolUse?: boolean;
+};
+
 type TestConnectionOptions = {
   baseUrl: string;
   apiKey: string;
@@ -142,6 +155,27 @@ function extractMessageContent(
   return content.map((part) => part?.text ?? "").join("").trim();
 }
 
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?:
+        | string
+        | Array<{
+            text?: string;
+          }>
+        | null;
+      tool_calls?: Array<{
+        id?: string;
+        type?: string;
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+      }>;
+    };
+  }>;
+};
+
 async function postChatCompletion({
   baseUrl,
   apiKey,
@@ -203,15 +237,7 @@ async function postChatCompletion({
     }
 
     return (await response.json()) as {
-      choices?: Array<{
-        message?: {
-          content?:
-            | string
-            | Array<{
-                text?: string;
-              }>;
-        };
-      }>;
+      choices?: ChatCompletionResponse["choices"];
     };
   }
 }
@@ -296,6 +322,243 @@ export async function requestStructuredJson<T extends z.ZodTypeAny>(options: Com
 
   const parsed = JSON.parse(extractJsonObject(content));
   return options.schema.parse(parsed);
+}
+
+function parsePseudoToolCalls(content: string) {
+  if (!content) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJsonObject(content));
+  } catch {
+    return [];
+  }
+
+  const toToolCall = (
+    value: unknown,
+    index: number
+  ): {
+    id: string;
+    function: {
+      name: string;
+      arguments: string;
+    };
+  } | null => {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const record = value as Record<string, unknown>;
+    const name =
+      (typeof record.tool === "string" && record.tool) ||
+      (typeof record.name === "string" && record.name) ||
+      (record.function && typeof record.function === "object" && typeof (record.function as Record<string, unknown>).name === "string"
+        ? String((record.function as Record<string, unknown>).name)
+        : "");
+    const args =
+      record.arguments ??
+      (record.function && typeof record.function === "object"
+        ? (record.function as Record<string, unknown>).arguments
+        : undefined) ??
+      {};
+
+    if (!name) {
+      return null;
+    }
+
+    return {
+      id: `pseudo-tool-${index + 1}`,
+      function: {
+        name,
+        arguments: typeof args === "string" ? args : JSON.stringify(args)
+      }
+    };
+  };
+
+  if (parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).tool_calls)) {
+    return ((parsed as Record<string, unknown>).tool_calls as unknown[])
+      .map((entry, index) => toToolCall(entry, index))
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  }
+
+  const single = toToolCall(parsed, 0);
+  return single ? [single] : [];
+}
+
+function stringifyToolResult(result: unknown) {
+  return JSON.stringify(result ?? null);
+}
+
+function buildPseudoToolCatalog(tools: ToolCompletionOptions<z.ZodTypeAny>["tools"]) {
+  return tools
+    .map((tool) =>
+      [
+        `Tool: ${tool.name}`,
+        `Description: ${tool.description}`,
+        `Arguments schema: ${JSON.stringify(tool.parameters)}`
+      ].join("\n")
+    )
+    .join("\n\n");
+}
+
+function supportsNativeToolsError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /does not support tools|tool(?:s)? (?:is|are) not supported|unsupported tool/i.test(error.message);
+}
+
+export async function requestStructuredJsonWithTools<T extends z.ZodTypeAny>(
+  options: ToolCompletionOptions<T>
+) {
+  const timeoutMs =
+    options.timeoutMs ??
+    (isLikelyOllamaBaseUrl(options.baseUrl) ? DEFAULT_LOCAL_OLLAMA_PLANNING_TIMEOUT_MS : DEFAULT_PLANNING_TIMEOUT_MS);
+  const isLocalOllama = isLikelyOllamaBaseUrl(options.baseUrl);
+  const maxSteps = Math.max(1, Math.min(options.maxSteps ?? 8, 12));
+  const toolDefinitions = options.tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters
+    }
+  }));
+  const pseudoToolCatalog = buildPseudoToolCatalog(options.tools);
+  const messages: Array<Record<string, unknown>> = [
+    {
+      role: "system",
+      content: [
+        options.systemPrompt,
+        "You may browse with the provided tools before answering.",
+        "Research across multiple independent sources when possible.",
+        "Available tools:",
+        pseudoToolCatalog,
+        "If native tool calling is unavailable, request a tool by returning JSON like {\"tool\":\"web_search\",\"arguments\":{...}} or {\"tool_calls\":[...]}.",
+        "When you are done, return the final answer as JSON only and do not wrap it in markdown."
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: options.userPrompt
+    }
+  ];
+  const usedTools = new Set<string>();
+  let sendNativeTools = toolDefinitions.length > 0;
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    let payload;
+    try {
+      payload = await postChatCompletion({
+        baseUrl: options.baseUrl,
+        apiKey: options.apiKey,
+        timeoutMs,
+        retries: options.retries ?? DEFAULT_PLANNING_RETRIES,
+        body: {
+          model: options.model,
+          temperature: options.temperature,
+          ...(typeof options.maxTokens === "number" ? { max_tokens: options.maxTokens } : {}),
+          ...(isLocalOllama && options.reasoningEffort
+            ? {
+                reasoning_effort: options.reasoningEffort
+              }
+            : {}),
+          ...(!sendNativeTools && isLocalOllama
+            ? {
+                response_format: {
+                  type: "json_object"
+                }
+              }
+            : {}),
+          messages,
+          ...(sendNativeTools ? { tools: toolDefinitions } : {})
+        }
+      });
+    } catch (error) {
+      // 兼容不支持原生 tools 的本地模型，降级为“伪工具调用”模式继续执行。
+      if (sendNativeTools && supportsNativeToolsError(error)) {
+        sendNativeTools = false;
+        step -= 1;
+        continue;
+      }
+
+      throw error;
+    }
+
+    const message = payload.choices?.[0]?.message;
+    const content = extractMessageContent(message?.content);
+    const nativeToolCalls =
+      message?.tool_calls?.filter(
+        (toolCall) => toolCall.function?.name && typeof toolCall.function.arguments === "string"
+      ) ?? [];
+    const pseudoToolCalls = nativeToolCalls.length === 0 ? parsePseudoToolCalls(content) : [];
+    const toolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : pseudoToolCalls;
+
+    if (toolCalls.length === 0) {
+      if (!content) {
+        throw new Error("LLM returned an empty response.");
+      }
+
+      if (options.requireToolUse && usedTools.size === 0) {
+        throw new Error("The model returned JSON without using any research tools.");
+      }
+
+      const parsed = JSON.parse(extractJsonObject(content));
+      return options.schema.parse(parsed);
+    }
+
+    if (nativeToolCalls.length > 0) {
+      messages.push({
+        role: "assistant",
+        content: message?.content ?? null,
+        tool_calls: message?.tool_calls
+      });
+    } else {
+      messages.push({
+        role: "assistant",
+        content
+      });
+    }
+
+    for (const [index, toolCall] of toolCalls.entries()) {
+      const toolName = toolCall.function?.name ?? "";
+      const tool = options.tools.find((entry) => entry.name === toolName);
+      const toolCallId = toolCall.id ?? `tool-call-${step + 1}-${index + 1}`;
+
+      let result: unknown;
+      try {
+        if (!tool) {
+          throw new Error(`Unknown tool: ${toolName}`);
+        }
+
+        const parsedArguments = JSON.parse(toolCall.function?.arguments ?? "{}");
+        result = await tool.execute(parsedArguments);
+        usedTools.add(toolName);
+      } catch (error) {
+        result = {
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+
+      if (nativeToolCalls.length > 0) {
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCallId,
+          content: stringifyToolResult(result)
+        });
+      } else {
+        messages.push({
+          role: "user",
+          content: `Tool result for ${toolName}:\n${stringifyToolResult(result)}`
+        });
+      }
+    }
+  }
+
+  throw new Error(`Tool-assisted LLM request exceeded ${maxSteps} steps without producing final JSON.`);
 }
 
 export async function listAvailableModels(options: ModelListOptions) {

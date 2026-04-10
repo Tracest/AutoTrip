@@ -8,7 +8,7 @@ import { decryptString } from "@/lib/security/crypto";
 export async function POST(request: Request) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   try {
@@ -23,7 +23,7 @@ export async function POST(request: Request) {
           : fallbackApiKey;
 
     if (!apiKey) {
-      return jsonError("API key is required to test the model connection unless you are using local Ollama.", 400);
+      return jsonError("测试模型连接时必须提供 API Key；如果使用本地 Ollama 则可留空。", 400);
     }
 
     const result = await testOpenAICompatibleConnection({
@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     });
     return jsonOk(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Connection test failed.";
+    const message = error instanceof Error ? error.message : "连接测试失败。";
     return jsonError(message, 400);
   }
 }

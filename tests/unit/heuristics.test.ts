@@ -100,4 +100,59 @@ describe("planning heuristics", () => {
     ).toBe(true);
     expect(itinerary.days[0].items.at(-1)?.category).toBe("\u591c\u666f");
   });
+
+  it("caps excessive travel minutes to the itinerary schema limit", () => {
+    const cappedRequest: TripRequest = {
+      ...request,
+      destination: "\u8d35\u9633",
+      interests: ["\u5386\u53f2", "\u591c\u666f"]
+    };
+
+    const cappedPois: Poi[] = [
+      {
+        id: "culture-stop",
+        name: "\u7532\u79c0\u697c",
+        address: "\u8d35\u9633\u5e02\u5357\u660e\u533a\u7fe0\u5fae\u5df78\u53f7",
+        city: "\u8d35\u9633",
+        country: "CN",
+        categories: ["\u5386\u53f2"],
+        latitude: 26.578343,
+        longitude: 106.714219,
+        recommendedDurationMinutes: 90
+      },
+      {
+        id: "night-stop",
+        name: "\u9ed4\u7075\u5c71\u89c2\u666f\u53f0",
+        address: "\u8d35\u9633\u5e02\u4e91\u5ca9\u533a\u67a3\u5c71\u8def",
+        city: "\u8d35\u9633",
+        country: "CN",
+        categories: ["\u591c\u666f"],
+        latitude: 26.606223,
+        longitude: 106.691248,
+        recommendedDurationMinutes: 90
+      }
+    ];
+
+    const itinerary = buildHeuristicItinerary(
+      cappedRequest,
+      [
+        { poi: cappedPois[0], score: 120 },
+        { poi: cappedPois[1], score: 110 }
+      ],
+      [
+        {
+          fromPoiId: "culture-stop",
+          toPoiId: "night-stop",
+          minutes: 480
+        }
+      ],
+      {
+        geoProvider: "mock",
+        createdAt: new Date().toISOString()
+      },
+      []
+    );
+
+    expect(itinerary.days[0].items[1]?.travelMinutesFromPrevious).toBe(300);
+  });
 });

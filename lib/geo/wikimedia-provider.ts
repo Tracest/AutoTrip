@@ -6,12 +6,15 @@ import {
   normalizeDestinationTerm,
   shouldPreferChineseOutput
 } from "@/lib/planning/destination";
+import { getDestinationGeoAnchor } from "@/lib/planning/destination-geo";
 import {
   getPoiQualityScore,
   hasVenueLikeSignal,
   isBroadAreaLikePoiName
 } from "@/lib/planning/poi-signals";
+import { buildWikiPageUrl } from "@/lib/geo/wikimedia-images";
 import type { Poi } from "@/lib/schemas/trip";
+import { getMeaningfulPoiAddress, hasMeaningfulPoiAddress } from "@/lib/utils/poi-address";
 
 type WikimediaSearchResult = {
   title?: string;
@@ -116,6 +119,26 @@ function toNumber(value: string | undefined) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function resolveSourcePageUrl(rawHref: string | undefined, host: string) {
+  if (!rawHref) {
+    return undefined;
+  }
+
+  if (/^https?:\/\//i.test(rawHref)) {
+    return rawHref;
+  }
+
+  if (rawHref.startsWith("//")) {
+    return `https:${rawHref}`;
+  }
+
+  if (rawHref.startsWith("/")) {
+    return `https://${host}${rawHref}`;
+  }
+
+  return undefined;
+}
+
 function hashString(value: string) {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -124,11 +147,12 @@ function hashString(value: string) {
   return hash;
 }
 
-function createSyntheticCoordinates(seed: string, destination: string) {
+export function createSyntheticCoordinates(seed: string, destination: string) {
   const hash = hashString(seed);
+  const anchor = getDestinationGeoAnchor(destination);
   const isDomestic = shouldPreferChineseOutput(destination);
-  const baseLat = isDomestic ? 31.23 : 40;
-  const baseLng = isDomestic ? 121.47 : 2;
+  const baseLat = anchor?.latitude ?? (isDomestic ? 30 : 40);
+  const baseLng = anchor?.longitude ?? (isDomestic ? 112 : 2);
   return {
     latitude: Number((baseLat + ((hash % 900) - 450) / 10_000).toFixed(6)),
     longitude: Number((baseLng + (((hash >> 8) % 900) - 450) / 10_000).toFixed(6))
@@ -290,7 +314,7 @@ function isLikelyAreaListing(listing: ParsedListing) {
   );
 }
 
-function parseListingsFromSection(html: string, sectionLine: string, tags: string[]) {
+function parseListingsFromSection(html: string, sectionLine: string, tags: string[], host: string) {
   const items = html.match(/<li><bdi class="vcard">[\s\S]*?<\/li>/g) ?? [];
   const isParsedListing = (listing: ParsedListing | null): listing is ParsedListing => listing !== null;
 
@@ -311,7 +335,11 @@ function parseListingsFromSection(html: string, sectionLine: string, tags: strin
       const summary = stripTags(item.match(/class="note listing-content">([\s\S]*?)<\/span>/i)?.[1]) || undefined;
       const latitude = toNumber(item.match(/abbr class="latitude">([^<]+)<\/abbr>/i)?.[1]);
       const longitude = toNumber(item.match(/abbr class="longitude">([^<]+)<\/abbr>/i)?.[1]);
-      const sourceUrlMatch = item.match(/href="(https?:\/\/[^"]+)"/i)?.[1];
+      const rawSourceHref =
+        item.match(/class="[^"]*listing-name[^"]*"[^>]*href="([^"]+)"/i)?.[1] ??
+        item.match(/class="[^"]*listing-name[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"/i)?.[1] ??
+        item.match(/href="([^"]+)"/i)?.[1];
+      const sourceUrlMatch = resolveSourcePageUrl(rawSourceHref, host);
 
       const listing: ParsedListing = {
         name,
@@ -531,7 +559,7 @@ async function fetchWikipediaPages(host: string, titles: string[]) {
   return (response.query?.pages ?? []).filter((page) => !page.missing && page.title);
 }
 
-function isUsefulSupplementalPage(
+export function isUsefulSupplementalPage(
   destination: string,
   title: string,
   extract: string | undefined,
@@ -540,9 +568,30 @@ function isUsefulSupplementalPage(
 ) {
   const text = `${title} ${extract ?? ""}`;
   const normalizedDestination = normalizeDestinationTerm(destination);
+  const normalizedTitle = normalizeDestinationTerm(title);
   const normalizedText = normalizeDestinationTerm(text);
+  const mentionsDestination =
+    normalizedText.includes(normalizedDestination) || normalizedDestination.includes(normalizedText);
+  const mentionsKnownNonDestinationCity =
+    /\u4e0a\u6d77|\u5317\u4eac|\u5e7f\u5dde|\u6df1\u5733|\u676d\u5dde|\u6210\u90fd|\u91cd\u5e86|\u5357\u4eac|\u82cf\u5dde|\u6b66\u6c49|\u897f\u5b89/.test(
+      text
+    );
+  const isAdministrativeRegionPage =
+    /(?:\u7701|\u5e02|\u81ea\u6cbb\u533a|\u7279\u522b\u884c\u653f\u533a|\u5730\u533a|\u76df)$/.test(title) &&
+    !hasPoiLikeVenueMarker(title);
+  const isTransitOrMediaPage =
+    /(?:\u8f68\u9053\u4ea4\u901a.*\u7ebf|\u5730\u94c1.*\u7ebf|\u5e7f\u64ad\u7535\u89c6\u53f0|\u7535\u89c6\u53f0|\u516c\u4ea4.*\u7ebf)/.test(
+      title
+    );
+  const lacksCoordinatesAndVenueSignal =
+    !hasCoordinates && !hasPoiLikeVenueMarker(title) && !hasVenueLikeSignal(title);
+  const mentionsOtherKnownCity = /涓婃捣|鍖椾含|骞垮窞|娣卞湷|鏉窞|鎴愰兘|閲嶅簡|鍗椾含|鑻忓窞|姝︽眽|瑗垮畨/.test(text);
 
-  if (!normalizedText.includes(normalizedDestination) && !normalizedDestination.includes(normalizedText)) {
+  if (!mentionsDestination && mentionsKnownNonDestinationCity) {
+    return false;
+  }
+
+  if (!mentionsDestination) {
     if (!/上海|北京|广州|深圳|杭州|成都|重庆|南京|苏州|武汉|西安/.test(text)) {
       return false;
     }
@@ -553,7 +602,11 @@ function isUsefulSupplementalPage(
   }
 
   if (
-    normalizeDestinationTerm(title) === normalizeDestinationTerm(destination) ||
+    normalizedTitle === normalizedDestination ||
+    normalizedTitle === `${normalizedDestination}\u5e02` ||
+    isAdministrativeRegionPage ||
+    isTransitOrMediaPage ||
+    lacksCoordinatesAndVenueSignal ||
     normalizeDestinationTerm(title) === `${normalizeDestinationTerm(destination)}市` ||
     isBroadAreaLikePoiName(title) ||
     chineseAreaLikePattern.test(title) ||
@@ -614,7 +667,7 @@ async function buildSupplementalSearchPois(params: GeoSearchParams) {
       collected.push({
         id: createSupplementalPoiId(params.destination, title),
         name: title,
-        address: destinationName,
+        address: "",
         city: destinationName,
         country: getDefaultCountryForDestination(params.destination),
         categories,
@@ -624,7 +677,8 @@ async function buildSupplementalSearchPois(params: GeoSearchParams) {
           ? 75
           : categories.includes("\u591c\u666f")
             ? 60
-            : 90
+            : 90,
+        sourcePageUrl: buildWikiPageUrl(host, title)
       });
     }
   }
@@ -680,7 +734,7 @@ function getPoiPriority(poi: Poi, destinationName: string) {
   if (poi.openingHoursText) {
     score += 4;
   }
-  if (poi.address && normalizeText(poi.address) !== normalizeText(destinationName)) {
+  if (hasMeaningfulPoiAddress({ address: poi.address, city: poi.city ?? destinationName })) {
     score += 3;
   }
   if (poi.categories.includes("\u591c\u666f")) {
@@ -771,7 +825,7 @@ export class WikimediaProvider implements GeoProvider {
         }
 
         const html = await fetchSectionText(host, pageTitle, section.index);
-        const listings = parseListingsFromSection(html, section.line, params.tags);
+        const listings = parseListingsFromSection(html, section.line, params.tags, host);
 
         for (const listing of listings) {
           const syntheticCoordinates = createSyntheticCoordinates(
@@ -782,7 +836,11 @@ export class WikimediaProvider implements GeoProvider {
           collected.push({
             id: createPoiId(params.destination, listing.name),
             name: listing.name,
-            address: listing.address ?? `${destinationName}`,
+            address:
+              getMeaningfulPoiAddress({
+                address: listing.address,
+                city: destinationName
+              }) ?? "",
             city: destinationName,
             country: getDefaultCountryForDestination(params.destination),
             categories: listing.categories,
@@ -793,7 +851,8 @@ export class WikimediaProvider implements GeoProvider {
               : /夜景/.test(listing.categories.join(" "))
                 ? 60
                 : 90,
-            openingHoursText: listing.openingHoursText
+            openingHoursText: listing.openingHoursText,
+            sourcePageUrl: listing.sourceUrl
           });
         }
       }

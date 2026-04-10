@@ -1,4 +1,8 @@
-import { getDestinationAliases, normalizeDestinationTerm } from "@/lib/planning/destination";
+import {
+  getDestinationAliases,
+  normalizeDestinationTerm,
+  shouldPreferChineseOutput
+} from "@/lib/planning/destination";
 import type { Poi } from "@/lib/schemas/trip";
 
 export type PoiBucket = "culture" | "food" | "night" | "nature" | "other";
@@ -250,6 +254,93 @@ const destinationAvoidPoiMap = new Map<string, string[]>([
   ["shanghai", ["上海大厦", "长滩观景塔", "石库门"]]
 ]);
 
+const inferredPoiCategoryRules = [
+  {
+    keywords: ["\u535a\u7269\u9986", "\u7eaa\u5ff5\u9986", "\u7f8e\u672f\u9986", "museum", "gallery"],
+    zh: ["\u535a\u7269\u9986", "\u5386\u53f2"],
+    en: ["museum", "history"],
+    buckets: ["culture"] as PoiBucket[]
+  },
+  {
+    keywords: [
+      "\u7f8e\u98df\u8857",
+      "\u5c0f\u5403\u8857",
+      "\u591c\u5e02",
+      "\u5e02\u96c6",
+      "\u9910\u5385",
+      "\u996d\u5e97",
+      "\u9152\u697c",
+      "\u8001\u5b57\u53f7",
+      "restaurant",
+      "snack",
+      "dessert",
+      "food street",
+      "night market",
+      "bazaar"
+    ],
+    zh: ["\u7f8e\u98df"],
+    en: ["food"],
+    buckets: ["food"] as PoiBucket[]
+  },
+  {
+    keywords: [
+      "\u89c2\u666f\u53f0",
+      "\u7535\u89c6\u5854",
+      "\u53cc\u5b50\u5854",
+      "\u6469\u5929\u8f6e",
+      "\u591c\u6e38",
+      "tower",
+      "bund",
+      "skyline",
+      "viewpoint",
+      "night cruise"
+    ],
+    zh: ["\u591c\u666f"],
+    en: ["nightview"],
+    buckets: ["night"] as PoiBucket[]
+  },
+  {
+    keywords: [
+      "\u516c\u56ed",
+      "\u690d\u7269\u56ed",
+      "\u52a8\u7269\u56ed",
+      "\u6e7f\u5730",
+      "\u5ce1\u8c37",
+      "\u7011\u5e03",
+      "\u6e56",
+      "\u5c71",
+      "park",
+      "garden",
+      "lake",
+      "mountain",
+      "canyon",
+      "waterfall"
+    ],
+    zh: ["\u81ea\u7136"],
+    en: ["nature"],
+    buckets: ["nature"] as PoiBucket[]
+  }
+] as const;
+
+const defaultBucketCategories: Record<Exclude<PoiBucket, "other">, { zh: string[]; en: string[] }> = {
+  culture: {
+    zh: ["\u5386\u53f2"],
+    en: ["history"]
+  },
+  food: {
+    zh: ["\u7f8e\u98df"],
+    en: ["food"]
+  },
+  night: {
+    zh: ["\u591c\u666f"],
+    en: ["nightview"]
+  },
+  nature: {
+    zh: ["\u81ea\u7136"],
+    en: ["nature"]
+  }
+};
+
 const normalizedKeywordCache = new Map<string, string>();
 
 function normalizeSignalText(value: string | undefined) {
@@ -267,7 +358,7 @@ function normalizeKeyword(keyword: string) {
   return normalized;
 }
 
-function includesAny(normalizedText: string, keywords: string[]) {
+function includesAny(normalizedText: string, keywords: readonly string[]) {
   return keywords.some((keyword) => normalizedText.includes(normalizeKeyword(keyword)));
 }
 
@@ -284,6 +375,10 @@ function getDestinationHintKeywords(destination: string, source: Map<string, str
 
 function hasStrongLandmarkSignal(normalizedText: string) {
   return includesAny(normalizedText, strongLandmarkKeywords);
+}
+
+function dedupeStrings(values: string[]) {
+  return Array.from(new Set(values));
 }
 
 export function hasVenueLikeSignal(name: string) {
@@ -347,6 +442,61 @@ export function getPoiPrimaryBucket(poi: PoiSignalInput) {
   }
 
   return "other" as const;
+}
+
+function inferPoiCategoriesFromName(destination: string, poi: PoiSignalInput) {
+  const normalizedName = normalizeSignalText(poi.name);
+  const matchedRule = inferredPoiCategoryRules.find((rule) => includesAny(normalizedName, rule.keywords));
+
+  if (!matchedRule) {
+    return {
+      categories: [] as string[],
+      buckets: [] as PoiBucket[]
+    };
+  }
+
+  return {
+    categories: shouldPreferChineseOutput(destination) ? [...matchedRule.zh] : [...matchedRule.en],
+    buckets: [...matchedRule.buckets]
+  };
+}
+
+function getCategoryBuckets(category: string) {
+  return getPoiBuckets({
+    name: "",
+    address: "",
+    categories: [category],
+    openingHoursText: undefined
+  }).filter((bucket) => bucket !== "other");
+}
+
+export function normalizePoiCategories(destination: string, poi: PoiSignalInput) {
+  const existingCategories = dedupeStrings((poi.categories ?? []).map((category) => category.trim()).filter(Boolean));
+  const inferred = inferPoiCategoriesFromName(destination, poi);
+
+  if (inferred.categories.length > 0) {
+    const hasAlignedExistingCategory = existingCategories.some((category) =>
+      getCategoryBuckets(category).some((bucket) => inferred.buckets.includes(bucket))
+    );
+    const isConservativeNightInference = inferred.buckets.includes("night") && inferred.buckets.length === 1;
+
+    if (!hasAlignedExistingCategory && (!isConservativeNightInference || existingCategories.length === 0)) {
+      return inferred.categories;
+    }
+  }
+
+  if (existingCategories.length > 0) {
+    return existingCategories;
+  }
+
+  const primaryBucket = getPoiPrimaryBucket(poi);
+  if (primaryBucket === "other") {
+    return [];
+  }
+
+  return shouldPreferChineseOutput(destination)
+    ? [...defaultBucketCategories[primaryBucket].zh]
+    : [...defaultBucketCategories[primaryBucket].en];
 }
 
 export function getPoiQualityScore(destination: string, poi: PoiSignalInput) {

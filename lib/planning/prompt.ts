@@ -38,6 +38,7 @@ export function buildPlannerSystemPrompt() {
     "Use only the provided candidate POIs and day buckets.",
     "Return structured JSON that matches the requested schema exactly.",
     "Respect opening-hour hints, realistic travel pacing, and the trip's daily stop limit.",
+    "All startTime and endTime values must use 24-hour HH:mm format.",
     "Do not invent POIs outside the candidate list.",
     "If some details are uncertain, keep the heuristic structure and fill conservative times.",
     "Prefer preserving candidate IDs while improving names, titles, categories, and schedule details.",
@@ -70,7 +71,8 @@ export function buildPlannerUserPrompt(request: TripRequest, rankedPois: Candida
       instructions: {
         perDayStopLimit:
           request.pace === "easy" ? 3 : request.pace === "packed" ? 5 : 4,
-        includeLunchBreakHint: true
+        includeLunchBreakHint: true,
+        timeFormat: "HH:mm"
       }
     },
     null,
@@ -80,17 +82,19 @@ export function buildPlannerUserPrompt(request: TripRequest, rankedPois: Candida
 
 export function buildPoiResearchSystemPrompt() {
   return [
-    "You are a travel POI researcher.",
-    "Return real-world points of interest for the given destination and interests.",
+    "You are a travel POI researcher with web access.",
+    "Use web search plus page fetches to collect real-world POIs for the destination and requested interests.",
+    "Check multiple independent sources before finalizing when possible, instead of relying on a single page.",
     "Only return places physically located in the destination city or its immediate metro area.",
-    "Prefer famous, actually existing places over generic recommendations.",
+    "Prefer attractions, museums, parks, food streets, night-view landmarks, and well-known local venues.",
+    "Categories must describe the POI itself; do not label a museum as food or a park as night view unless the venue is explicitly known for that.",
     "Do not invent placeholder names, fake addresses, or synthetic identifiers.",
-    "Avoid hotels, apartment buildings, office towers, and purely generic labels unless the user explicitly asked for them.",
-    "Do not use roads, districts, neighborhoods, financial districts, or broad areas as POIs unless they are true tourist attractions.",
+    "Do not return provinces, districts, roads, neighborhoods, transit lines, media organizations, office towers, apartment complexes, or generic region pages as POIs.",
+    "Avoid hotels and accommodations unless the user explicitly asked for them.",
     "If the request says the preferred language is zh-CN, output Simplified Chinese names and addresses.",
     "If you are unsure about an address or coordinate, omit that field instead of guessing.",
-    "The top-level JSON must be an object with a `pois` array.",
-    "Return JSON only."
+    "Include `sourcePageUrl` whenever you can cite a concrete page for the POI.",
+    "The top-level JSON must be an object with a `pois` array."
   ].join(" ");
 }
 
@@ -109,14 +113,18 @@ export function buildPoiResearchUserPrompt(request: TripRequest, desiredCount: n
       notes: request.notes,
       desiredCount,
       requirements: {
+        useWebResearchTools: true,
         useRealPoisOnly: true,
+        inspectMultipleSources: true,
         mixFoodAndSightseeing: true,
         includeApproximateCoordinatesIfKnown: true,
         includeAddressOnlyIfConfident: true,
+        includeSourcePageUrlIfKnown: true,
         avoidPlaceholderWords: ["recommended spot", "sample address", "poi 1", "spot 1"],
         keepResultsInsideDestination: true,
         avoidHotelsAndAccommodation: true,
         avoidAreaLevelPlaces: true,
+        categoriesMustMatchVenueType: true,
         outputLanguageRule: outputRules.languageRule,
         translationRule: outputRules.translationRule
       },
@@ -134,54 +142,10 @@ export function buildPoiResearchUserPrompt(request: TripRequest, desiredCount: n
             categories: request.interests.slice(0, 2),
             latitude: 26.57,
             longitude: 106.71,
-            recommendedDurationMinutes: 90
+            recommendedDurationMinutes: 90,
+            sourcePageUrl: "https://example.com/poi-source"
           }
         ]
-      }
-    },
-    null,
-    2
-  );
-}
-
-export function buildPoiVerifierSystemPrompt() {
-  return [
-    "You are vetting travel POI candidates.",
-    "Keep only places you are reasonably confident are truly inside the requested destination city or metro area.",
-    "Remove generic labels, hotels, residential buildings, roads, districts, neighborhoods, and broad areas that are not true POIs.",
-    "Prefer culturally relevant landmarks, museums, food streets, parks, and real attractions.",
-    "Preserve the original `id` exactly for every kept candidate.",
-    "If the request says the preferred language is zh-CN, localize the kept POI names and addresses into Simplified Chinese.",
-    "The top-level JSON must be an object with a `pois` array.",
-    "Return JSON only."
-  ].join(" ");
-}
-
-export function buildPoiVerifierUserPrompt(request: TripRequest, candidates: Array<Record<string, unknown>>) {
-  const destinationAliases = getDestinationAliases(request.destination);
-  const outputRules = getLanguageInstructions(request.destination);
-
-  return JSON.stringify(
-    {
-      destination: request.destination,
-      destinationAliases,
-      preferredLanguage: getPreferredLanguage(request.destination),
-      interests: request.interests,
-      mustVisit: request.mustVisit,
-      notes: request.notes,
-      candidatePois: candidates,
-      keepRules: {
-        cityMustMatchDestination: true,
-        removeAccommodation: true,
-        removeGenericNames: true,
-        removeAreaLevelPlaces: true,
-        keepOnlyHighConfidenceMatches: true,
-        preserveExistingIds: true,
-        outputLanguageRule: outputRules.languageRule,
-        translationRule: outputRules.translationRule
-      },
-      responseShapeExample: {
-        pois: candidates.slice(0, 2)
       }
     },
     null,

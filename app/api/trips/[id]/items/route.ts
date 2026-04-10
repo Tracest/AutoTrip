@@ -19,7 +19,7 @@ const updateItemsSchema = z.object({
 export async function PATCH(request: Request, context: Context) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   const trip = await prisma.trip.findFirst({
@@ -30,7 +30,7 @@ export async function PATCH(request: Request, context: Context) {
   });
 
   if (!trip) {
-    return jsonError("Trip not found.", 404);
+    return jsonError("未找到该行程。", 404);
   }
 
   try {
@@ -63,6 +63,6 @@ export async function PATCH(request: Request, context: Context) {
       })
     );
   } catch (error) {
-    return jsonError("Unable to save itinerary edits.", 400, error instanceof Error ? error.message : error);
+    return jsonError("保存行程编辑失败。", 400, error instanceof Error ? error.message : error);
   }
 }

@@ -8,11 +8,10 @@ import {
   localizeCategoryLabel,
   scoreCandidates
 } from "@/lib/planning/heuristics";
+import { enrichItineraryPoiImages } from "@/lib/planning/poi-images";
 import {
   buildPlannerSystemPrompt,
   buildPlannerUserPrompt,
-  buildPoiVerifierSystemPrompt,
-  buildPoiVerifierUserPrompt,
   buildPoiResearchSystemPrompt,
   buildPoiResearchUserPrompt
 } from "@/lib/planning/prompt";
@@ -20,14 +19,27 @@ import {
   containsCjk,
   getDefaultCountryForDestination,
   isLikelyDomesticDestination,
+  matchesDestinationAlias,
+  normalizeDestinationTerm,
+  resolvePlanningDestination,
   shouldPreferChineseOutput
 } from "@/lib/planning/destination";
+import { getDestinationGeoAnchor, partitionDestinationOutlierPois } from "@/lib/planning/destination-geo";
+import { getCoreCitySeedPois } from "@/lib/planning/core-city-seeds";
 import { mergeIssues, repairItinerary, validateItinerary } from "@/lib/planning/validator";
-import { requestStructuredJson } from "@/lib/llm/openai-compatible";
+import { requestStructuredJson, requestStructuredJsonWithTools } from "@/lib/llm/openai-compatible";
+import { createWebResearchTools } from "@/lib/llm/web-research";
 import { isLikelyOllamaBaseUrl } from "@/lib/llm/provider-utils";
+import {
+  getPoiQualityScore,
+  hasVenueLikeSignal,
+  isBroadAreaLikePoiName,
+  normalizePoiCategories
+} from "@/lib/planning/poi-signals";
 import type { Itinerary, ItineraryDay, ItineraryItem, PlanningIssue, Poi, TripRequest } from "@/lib/schemas/trip";
-import { addMinutesToTime } from "@/lib/utils/time";
+import { addMinutesToTime, normalizeTimeValue } from "@/lib/utils/time";
 import { itinerarySchema, relaxedItinerarySchema, relaxedPoiSchema } from "@/lib/schemas/trip";
+import { getMeaningfulPoiAddress } from "@/lib/utils/poi-address";
 
 type ProgressEvent = {
   stage: "candidates" | "preplan" | "llm" | "validate" | "persist";
@@ -38,6 +50,7 @@ type PlanTripOptions = {
   request: TripRequest;
   llmConfig?: LlmProviderConfig | null;
   onProgress?: (event: ProgressEvent) => void;
+  skipPoiImageEnrichment?: boolean;
 };
 
 type ReplanOptions = {
@@ -69,6 +82,14 @@ const accommodationPattern = /(hotel|hostel|resort|apartment|inn|guesthouse|酒�
 const vagueAddressPattern = /(various locations|multiple locations|city center|downtown|across the city)/i;
 const areaLikePoiNamePattern =
   /\b(road|street|district|area|town|lane|financial district|concession|neighbou?rhood|central area|downtown)\b/i;
+const administrativeRegionPoiNamePattern =
+  /(?:province|city|district|county|prefecture|region|自治州|自治区|特别行政区|省|市|区|县|州)$/iu;
+const transitInfrastructurePoiNamePattern =
+  /(轨道交通\s*\d+\s*号线|地铁\s*\d+\s*号线|轨道交通|地铁|有轨电车|公交线路|铁路线路|metro line|subway line|rail line|tram line|line\s*\d+)/i;
+const mediaOrganizationPoiNamePattern =
+  /(广播电视台|电视台|广播电台|电台|融媒体中心|传媒集团|新闻中心|tv station|television station|radio station|media group)/i;
+const officeOrResidentialPoiNamePattern =
+  /(写字楼|办公楼|办公大厦|产业园|工业园|公寓|住宅小区|商务中心|office tower|office building|apartment complex|residential complex)/i;
 
 function findArrayCandidate(payload: Record<string, unknown>, preferredKeys: string[]) {
   for (const key of preferredKeys) {
@@ -205,11 +226,20 @@ function hashString(value: string) {
   return hash;
 }
 
-function createSyntheticCoordinates(seed: string, destination: string, index: number) {
+function createSyntheticCoordinates(
+  seed: string,
+  destination: string,
+  index: number,
+  anchor?: {
+    latitude: number;
+    longitude: number;
+  }
+) {
   const hash = hashString(`${seed}:${index}`);
   const isDomestic = isLikelyDomesticDestination(destination);
-  const baseLat = isDomestic ? 30 : 40;
-  const baseLng = isDomestic ? 112 : 2;
+  const destinationAnchor = getDestinationGeoAnchor(destination);
+  const baseLat = anchor?.latitude ?? destinationAnchor?.latitude ?? (isDomestic ? 30 : 40);
+  const baseLng = anchor?.longitude ?? destinationAnchor?.longitude ?? (isDomestic ? 112 : 2);
   const latOffset = ((hash % 1000) - 500) / 10_000;
   const lngOffset = (((hash >> 8) % 1000) - 500) / 10_000;
   return {
@@ -233,41 +263,172 @@ function createCandidateLookup(candidates: Poi[]) {
   };
 }
 
+function getPoiCentroid(pois: Poi[]) {
+  const validPois = pois.filter(
+    (poi) => Number.isFinite(poi.latitude) && Number.isFinite(poi.longitude)
+  );
+
+  if (validPois.length === 0) {
+    return undefined;
+  }
+
+  return {
+    latitude: validPois.reduce((sum, poi) => sum + poi.latitude, 0) / validPois.length,
+    longitude: validPois.reduce((sum, poi) => sum + poi.longitude, 0) / validPois.length
+  };
+}
+
+function isAdministrativeRegionLikePoiName(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return administrativeRegionPoiNamePattern.test(trimmed) && !hasVenueLikeSignal(trimmed);
+}
+
+function isClearlyInvalidPoiName(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return (
+    genericPoiNamePattern.test(trimmed) ||
+    areaLikePoiNamePattern.test(trimmed) ||
+    isBroadAreaLikePoiName(trimmed) ||
+    isAdministrativeRegionLikePoiName(trimmed) ||
+    transitInfrastructurePoiNamePattern.test(trimmed) ||
+    mediaOrganizationPoiNamePattern.test(trimmed) ||
+    officeOrResidentialPoiNamePattern.test(trimmed)
+  );
+}
+
+function shouldRepairCandidateCoordinates(request: TripRequest, poi: Poi) {
+  if (isClearlyInvalidPoiName(poi.name)) {
+    return false;
+  }
+
+  const alignedByAddress = matchesDestinationAlias(poi.address, request.destination);
+  const alignedByCity = matchesDestinationAlias(poi.city, request.destination);
+  if (!alignedByAddress && !alignedByCity) {
+    return false;
+  }
+
+  if (alignedByAddress) {
+    return true;
+  }
+
+  return getPoiQualityScore(request.destination, poi) >= 10;
+}
+
+function repairCandidateCoordinates(request: TripRequest, candidates: Poi[]) {
+  return candidates.map((poi, index) => {
+    const { anchor, dropped } = partitionDestinationOutlierPois(request.destination, [poi]);
+    if (!anchor || dropped.length === 0 || !shouldRepairCandidateCoordinates(request, poi)) {
+      return poi;
+    }
+
+    const synthetic = createSyntheticCoordinates(
+      `${request.destination}:${poi.name}:${poi.address}:${poi.city ?? ""}`,
+      request.destination,
+      index,
+      anchor
+    );
+
+    return {
+      ...poi,
+      latitude: synthetic.latitude,
+      longitude: synthetic.longitude
+    };
+  });
+}
+
+function sanitizeCandidatePool(request: TripRequest, candidates: Poi[], issues: PlanningIssue[]) {
+  const categorizedCandidates = candidates.map((poi) => ({
+    ...poi,
+    categories: normalizePoiCategories(request.destination, poi)
+  }));
+  const repairedCandidates = repairCandidateCoordinates(request, categorizedCandidates);
+  const { kept, dropped } = partitionDestinationOutlierPois(request.destination, repairedCandidates);
+
+  if (dropped.length === 0) {
+    return repairedCandidates;
+  }
+
+  issues.push({
+    severity: "warning",
+    code: "geo-outlier-filter",
+    message: localizeForRequest(
+      request,
+      `Removed ${dropped.length} candidate places that were far outside ${request.destination}.`,
+      `已剔除 ${dropped.length} 个明显偏离 ${request.destination} 的候选点。`
+    ),
+    source: "candidate-builder",
+    suggestion: localizeForRequest(
+      request,
+      `Filtered outliers: ${dropped.slice(0, 3).map((entry) => entry.poi.name).join(", ")}.`,
+      `已过滤的异常地点包括：${dropped.slice(0, 3).map((entry) => entry.poi.name).join("、")}。`
+    )
+  });
+
+  return kept;
+}
+
 function toPoiFromRelaxed(
   relaxedPoi: RelaxedPoi,
   request: TripRequest,
   index: number,
-  candidateLookup?: ReturnType<typeof createCandidateLookup>
+  candidateLookup?: ReturnType<typeof createCandidateLookup>,
+  fallbackGeoAnchor?: {
+    latitude: number;
+    longitude: number;
+  }
 ) {
   const matchedCandidate =
     (relaxedPoi.id ? candidateLookup?.byId.get(relaxedPoi.id) : undefined) ??
     candidateLookup?.byName.get(normalizeKey(relaxedPoi.name));
+  const resolvedCity = relaxedPoi.city ?? matchedCandidate?.city ?? request.destination;
+  const resolvedAddress =
+    getMeaningfulPoiAddress({
+      address: relaxedPoi.address ?? matchedCandidate?.address,
+      city: resolvedCity
+    }) ?? "";
 
   const synthetic = createSyntheticCoordinates(
     `${request.destination}:${relaxedPoi.name}`,
     request.destination,
-    index
+    index,
+    fallbackGeoAnchor
   );
   const id = relaxedPoi.id ?? matchedCandidate?.id ?? `${createSlug(request.destination)}-${createSlug(relaxedPoi.name)}-${index + 1}`;
-
-  return {
-    id,
+  const resolvedCategories = normalizePoiCategories(request.destination, {
     name: relaxedPoi.name,
-    address: relaxedPoi.address ?? matchedCandidate?.address ?? `${request.destination}${relaxedPoi.name}`,
-    city: relaxedPoi.city ?? matchedCandidate?.city ?? request.destination,
-    country:
-      relaxedPoi.country ??
-      matchedCandidate?.country ??
-      getDefaultCountryForDestination(request.destination),
+    address: resolvedAddress,
     categories:
       relaxedPoi.categories?.filter(Boolean) ??
       matchedCandidate?.categories ??
       request.interests.slice(0, 2),
+    openingHoursText: relaxedPoi.openingHoursText ?? matchedCandidate?.openingHoursText
+  });
+
+  return {
+    id,
+    name: relaxedPoi.name,
+    address: resolvedAddress,
+    city: resolvedCity,
+    country:
+      relaxedPoi.country ??
+      matchedCandidate?.country ??
+      getDefaultCountryForDestination(request.destination),
+    categories: resolvedCategories,
     latitude: relaxedPoi.latitude ?? matchedCandidate?.latitude ?? synthetic.latitude,
     longitude: relaxedPoi.longitude ?? matchedCandidate?.longitude ?? synthetic.longitude,
     recommendedDurationMinutes:
       relaxedPoi.recommendedDurationMinutes ?? matchedCandidate?.recommendedDurationMinutes ?? 90,
-    openingHoursText: relaxedPoi.openingHoursText ?? matchedCandidate?.openingHoursText
+    openingHoursText: relaxedPoi.openingHoursText ?? matchedCandidate?.openingHoursText,
+    sourcePageUrl: relaxedPoi.sourcePageUrl ?? matchedCandidate?.sourcePageUrl,
+    image: relaxedPoi.image ?? matchedCandidate?.image
   } satisfies Poi;
 }
 
@@ -284,8 +445,20 @@ function cleanLlmFallbackPois(
   const destinationCountry = getDefaultCountryForDestination(request.destination);
   const prefersChineseOutput = shouldPreferChineseOutput(request.destination);
   const requireLocalizedDisplayName = options?.requireLocalizedDisplayName ?? true;
+  const normalizedPlanningDestination = normalizeKey(resolvePlanningDestination(request.destination));
+  const genericDestinationPoiSuffixes = [
+    "\u7f8e\u98df\u8857",
+    "\u5c0f\u5403\u8857",
+    "\u591c\u666f",
+    "\u591c\u6e38",
+    "\u89c2\u666f\u53f0",
+    "food street",
+    "snack street",
+    "night view",
+    "night tour"
+  ].map((value) => normalizeKey(value));
 
-  return pois.filter((poi) => {
+  const filtered = pois.filter((poi) => {
     const placeholderPattern = /推荐点|示例地址|spot\s*\d+|poi\s*\d+/i;
     const key = poi.name.trim().toLowerCase();
     const normalizedName = normalizeKey(poi.name);
@@ -302,21 +475,24 @@ function cleanLlmFallbackPois(
       normalizedCountry.length > 0 &&
       ((destinationCountry === "CN" && normalizedCountry !== "CN") ||
         (destinationCountry === "INTL" && normalizedCountry === "CN"));
-    const isAreaLikeName = areaLikePoiNamePattern.test(poi.name.trim());
     const lacksChineseDisplayName =
       requireLocalizedDisplayName &&
       prefersChineseOutput &&
       !containsCjk(poi.name) &&
       !explicitlyRequestedPoi;
+    const destinationPrefixedGenericPoi =
+      normalizedPlanningDestination.length > 0 &&
+      normalizedName.startsWith(normalizedPlanningDestination) &&
+      genericDestinationPoiSuffixes.includes(normalizedName.slice(normalizedPlanningDestination.length));
 
     if (
       !key ||
       placeholderPattern.test(poi.name) ||
       placeholderPattern.test(poi.address) ||
-      genericPoiNamePattern.test(poi.name.trim()) ||
-      isAreaLikeName ||
+      isClearlyInvalidPoiName(poi.name) ||
       vagueAddressPattern.test(poi.address) ||
       lacksChineseDisplayName ||
+      destinationPrefixedGenericPoi ||
       hasExplicitCountryMismatch ||
       (mentionsAccommodation && !explicitlyRequestedAccommodation)
     ) {
@@ -329,11 +505,14 @@ function cleanLlmFallbackPois(
     seen.add(key);
     return true;
   });
+
+  return mergeCandidatePools(request.destination, filtered);
 }
 
 function derivePlanningIssues(request: TripRequest, geoProviderName: string) {
   const issues: PlanningIssue[] = [];
   const isDomestic = isLikelyDomesticDestination(request.destination);
+  const planningDestination = resolvePlanningDestination(request.destination);
 
   if (!isDomestic) {
     issues.push({
@@ -345,19 +524,25 @@ function derivePlanningIssues(request: TripRequest, geoProviderName: string) {
     });
   }
 
-  return issues;
-}
+  if (normalizeDestinationTerm(planningDestination) !== normalizeDestinationTerm(request.destination)) {
+    issues.push({
+      severity: "warning",
+      code: "broad-destination-fallback",
+      message: localizeForRequest(
+        request,
+        `Province-level destination input was narrowed to the provincial capital for planning: ${request.destination} -> ${planningDestination}.`,
+        `当前会先按省会城市规划该省级目的地：${request.destination} -> ${planningDestination}。`
+      ),
+      source: geoProviderName,
+      suggestion: localizeForRequest(
+        request,
+        "If you want another city inside the province, enter that city directly for more precise results.",
+        "如果你想规划省内其他城市，请直接填写城市名以获得更精确的结果。"
+      )
+    });
+  }
 
-function serializePoiForVerifier(poi: Poi) {
-  return {
-    id: poi.id,
-    name: poi.name,
-    address: poi.address,
-    city: poi.city,
-    country: poi.country,
-    categories: poi.categories,
-    recommendedDurationMinutes: poi.recommendedDurationMinutes
-  };
+  return issues;
 }
 
 function selectDiverseCandidates(
@@ -374,15 +559,7 @@ function selectDiverseCandidates(
     interest,
     index: 0,
     entries: ranked.filter((entry) =>
-      entry.poi.categories.some((category) => {
-        const normalizedCategory = normalizeKey(category);
-        const normalizedInterest = normalizeKey(interest);
-
-        return (
-          normalizedCategory.includes(normalizedInterest) ||
-          normalizedInterest.includes(normalizedCategory)
-        );
-      })
+      entry.poi.categories.some((category) => categoryMatchesInterest(category, interest))
     )
   }));
 
@@ -429,11 +606,263 @@ function selectDiverseCandidates(
   return selected;
 }
 
-function assertCandidateCoverage(request: TripRequest, chosen: Poi[]) {
-  const missingInterests = request.interests.filter(
+function getMissingInterestCoverage(request: TripRequest, pois: Poi[]) {
+  return request.interests.filter(
     (interest) =>
-      !chosen.some((poi) => poi.categories.some((category) => categoryMatchesInterest(category, interest)))
+      !pois.some((poi) => poi.categories.some((category) => categoryMatchesInterest(category, interest)))
   );
+}
+
+const poiVariantSuffixes = [
+  "\u591c\u666f",
+  "\u591c\u6e38",
+  "\u591c\u8272",
+  "\u89c2\u666f",
+  "\u89c2\u666f\u53f0",
+  "\u89c2\u666f\u70b9",
+  "\u6253\u5361",
+  "\u6253\u5361\u70b9",
+  "\u666f\u533a",
+  "\u666f\u70b9",
+  "\u98ce\u666f\u533a",
+  "\u65c5\u6e38\u533a",
+  "nightview",
+  "nightviewspot",
+  "nighttour",
+  "viewpoint",
+  "scenicspot"
+].map((value) => normalizeKey(value));
+
+function normalizePoiVariantName(name: string) {
+  let normalized = normalizeKey(name);
+
+  for (const suffix of poiVariantSuffixes) {
+    if (normalized.endsWith(suffix) && normalized.length > suffix.length + 1) {
+      normalized = normalized.slice(0, -suffix.length);
+      break;
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeSourcePageUrl(url?: string) {
+  if (!url) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    parsed.search = "";
+    const pathname = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+    return `${parsed.origin.toLowerCase()}${pathname}`;
+  } catch {
+    return "";
+  }
+}
+
+function areEquivalentPoiAddresses(left: string, right: string) {
+  const normalizedLeft = normalizeKey(left);
+  const normalizedRight = normalizeKey(right);
+
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return (
+    normalizedLeft === normalizedRight ||
+    (normalizedLeft.length >= 6 && normalizedRight.includes(normalizedLeft)) ||
+    (normalizedRight.length >= 6 && normalizedLeft.includes(normalizedRight))
+  );
+}
+
+function areSemanticallyEquivalentPois(left: Poi, right: Poi) {
+  const normalizedLeftCity = normalizeKey(left.city ?? "");
+  const normalizedRightCity = normalizeKey(right.city ?? "");
+
+  if (normalizedLeftCity && normalizedRightCity && normalizedLeftCity !== normalizedRightCity) {
+    return false;
+  }
+
+  const normalizedLeftSource = normalizeSourcePageUrl(left.sourcePageUrl);
+  const normalizedRightSource = normalizeSourcePageUrl(right.sourcePageUrl);
+  if (normalizedLeftSource && normalizedLeftSource === normalizedRightSource) {
+    return true;
+  }
+
+  const normalizedLeftVariant = normalizePoiVariantName(left.name);
+  const normalizedRightVariant = normalizePoiVariantName(right.name);
+
+  if (!normalizedLeftVariant || normalizedLeftVariant !== normalizedRightVariant) {
+    return false;
+  }
+
+  return areEquivalentPoiAddresses(left.address, right.address);
+}
+
+function getPoiVariantSpecificityPenalty(name: string) {
+  return normalizePoiVariantName(name) !== normalizeKey(name) ? 2 : 0;
+}
+
+function getPoiMergePreferenceScore(destination: string, poi: Poi) {
+  return (
+    getPoiQualityScore(destination, poi) +
+    (poi.sourcePageUrl ? 4 : 0) +
+    (poi.image ? 2 : 0) +
+    Math.min(poi.categories.length, 3) +
+    (poi.address.trim().length > 0 ? 2 : 0) -
+    getPoiVariantSpecificityPenalty(poi.name)
+  );
+}
+
+function mergeEquivalentPoiVariants(destination: string, current: Poi, incoming: Poi) {
+  const preferIncoming =
+    getPoiMergePreferenceScore(destination, incoming) >
+    getPoiMergePreferenceScore(destination, current);
+  const primary = preferIncoming ? incoming : current;
+  const secondary = preferIncoming ? current : incoming;
+
+  return {
+    ...primary,
+    address: primary.address || secondary.address,
+    city: primary.city || secondary.city,
+    country: primary.country || secondary.country,
+    categories: normalizePoiCategories(destination, {
+      ...primary,
+      categories: [...primary.categories, ...secondary.categories]
+    }),
+    latitude: primary.latitude ?? secondary.latitude,
+    longitude: primary.longitude ?? secondary.longitude,
+    recommendedDurationMinutes:
+      primary.recommendedDurationMinutes ?? secondary.recommendedDurationMinutes ?? 90,
+    openingHoursText: primary.openingHoursText ?? secondary.openingHoursText,
+    sourcePageUrl: primary.sourcePageUrl ?? secondary.sourcePageUrl,
+    image: primary.image ?? secondary.image
+  };
+}
+
+function mergeCandidatePools(destination: string, ...pools: Poi[][]) {
+  const merged: Poi[] = [];
+  const seenIds = new Map<string, number>();
+  const seenNames = new Map<string, number>();
+
+  for (const pool of pools) {
+    for (const poi of pool) {
+      const idKey = poi.id.trim();
+      const nameKey = normalizeKey(`${poi.name}:${poi.city ?? ""}`);
+
+      const existingIndex =
+        (idKey ? seenIds.get(idKey) : undefined) ??
+        (nameKey ? seenNames.get(nameKey) : undefined) ??
+        merged.findIndex((existingPoi) => areSemanticallyEquivalentPois(existingPoi, poi));
+
+      if (typeof existingIndex === "number" && existingIndex >= 0) {
+        const mergedPoi = mergeEquivalentPoiVariants(destination, merged[existingIndex], poi);
+        merged[existingIndex] = mergedPoi;
+
+        if (idKey) {
+          seenIds.set(idKey, existingIndex);
+        }
+        if (mergedPoi.id.trim()) {
+          seenIds.set(mergedPoi.id.trim(), existingIndex);
+        }
+        if (nameKey) {
+          seenNames.set(nameKey, existingIndex);
+        }
+        const mergedNameKey = normalizeKey(`${mergedPoi.name}:${mergedPoi.city ?? ""}`);
+        if (mergedNameKey) {
+          seenNames.set(mergedNameKey, existingIndex);
+        }
+        continue;
+      }
+
+      if (idKey) {
+        seenIds.set(idKey, merged.length);
+      }
+      if (nameKey) {
+        seenNames.set(nameKey, merged.length);
+      }
+
+      merged.push(poi);
+    }
+  }
+
+  return merged;
+}
+
+function getMinimumUsableCandidateCount(request: TripRequest) {
+  return Math.min(6, request.days * 2);
+}
+
+function supplementCandidatesWithCoreCitySeeds(options: {
+  request: TripRequest;
+  destination: string;
+  candidates: Poi[];
+  coreCitySeeds: Poi[];
+  minimumUsableCandidateCount: number;
+  issues: PlanningIssue[];
+}) {
+  const {
+    request,
+    destination,
+    candidates,
+    coreCitySeeds,
+    minimumUsableCandidateCount,
+    issues
+  } = options;
+
+  if (coreCitySeeds.length === 0 || candidates.length === 0) {
+    return candidates;
+  }
+
+  const missingInterestCoverageBeforeSeeds = getMissingInterestCoverage(request, candidates);
+  const mergedCandidates = mergeCandidatePools(destination, candidates, coreCitySeeds);
+  const missingInterestCoverageAfterSeeds = getMissingInterestCoverage(request, mergedCandidates);
+  const repairedCoverageBySeeds =
+    missingInterestCoverageAfterSeeds.length < missingInterestCoverageBeforeSeeds.length;
+  const repairedDepthBySeeds =
+    candidates.length < minimumUsableCandidateCount &&
+    mergedCandidates.length >= minimumUsableCandidateCount;
+
+  if (mergedCandidates.length <= candidates.length || (!repairedCoverageBySeeds && !repairedDepthBySeeds)) {
+    return candidates;
+  }
+
+  issues.push({
+    severity: "warning",
+    code: "core-city-seed-supplement",
+    message: repairedCoverageBySeeds
+      ? localizeForRequest(
+          request,
+          `The candidate set for ${destination} missed ${missingInterestCoverageBeforeSeeds.join(", ")}, so curated city seed POIs were merged in.`,
+          `${destination} \u7684\u5019\u9009\u70b9\u672a\u8986\u76d6\u8fd9\u4e9b\u5174\u8da3\uff1a${missingInterestCoverageBeforeSeeds.join("\u3001")}\uff0c\u5df2\u5e76\u5165\u5185\u7f6e\u57ce\u5e02\u79cd\u5b50\u70b9\u8865\u9f50\u3002`
+        )
+      : localizeForRequest(
+          request,
+          `The candidate set for ${destination} was too thin for a stable itinerary, so curated city seed POIs were merged in.`,
+          `${destination} \u7684\u5019\u9009\u70b9\u6570\u91cf\u504f\u8584\uff0c\u5df2\u5e76\u5165\u5185\u7f6e\u57ce\u5e02\u79cd\u5b50\u70b9\u63d0\u9ad8\u89c4\u5212\u7a33\u5b9a\u6027\u3002`
+        ),
+    source: "candidate-builder",
+    suggestion:
+      missingInterestCoverageAfterSeeds.length === 0
+        ? localizeForRequest(
+            request,
+            "Coverage is now stable, but you should still spot-check names and opening hours.",
+            "\u5f53\u524d\u5019\u9009\u70b9\u8986\u76d6\u5df2\u7a33\u5b9a\uff0c\u4f46\u4ecd\u5efa\u8bae\u62bd\u67e5\u5730\u70b9\u540d\u79f0\u4e0e\u8425\u4e1a\u65f6\u95f4\u3002"
+          )
+        : localizeForRequest(
+            request,
+            `Some interests are still thin after merging city seed POIs: ${missingInterestCoverageAfterSeeds.join(", ")}.`,
+            `\u5e76\u5165\u5185\u7f6e\u57ce\u5e02\u79cd\u5b50\u70b9\u540e\uff0c\u8fd9\u4e9b\u5174\u8da3\u4ecd\u7136\u504f\u8584\uff1a${missingInterestCoverageAfterSeeds.join("\u3001")}\u3002`
+          )
+  });
+
+  return mergedCandidates;
+}
+
+function assertCandidateCoverage(request: TripRequest, chosen: Poi[]) {
+  const missingInterests = getMissingInterestCoverage(request, chosen);
 
   if (missingInterests.length > 0) {
     throw new Error(
@@ -445,7 +874,7 @@ function assertCandidateCoverage(request: TripRequest, chosen: Poi[]) {
     );
   }
 
-  if (chosen.length < Math.min(6, request.days * 2)) {
+  if (chosen.length < getMinimumUsableCandidateCount(request)) {
     throw new Error(
       localizeForRequest(
         request,
@@ -520,21 +949,17 @@ function summarizeHeuristicForPrompt(heuristic: Itinerary) {
   };
 }
 
-function shouldVerifyLocalCandidates(request: TripRequest, pois: Poi[]) {
-  if (pois.length === 0) {
-    return false;
+async function buildLlmCandidatePois(
+  request: TripRequest,
+  llmConfig: LlmProviderConfig,
+  desiredCount: number,
+  options?: {
+    fallbackGeoAnchor?: {
+      latitude: number;
+      longitude: number;
+    };
   }
-
-  return pois.some((poi) => {
-    const areaLikeName = areaLikePoiNamePattern.test(poi.name);
-    const needsChineseLocalization =
-      shouldPreferChineseOutput(request.destination) && !containsCjk(poi.name);
-
-    return areaLikeName || needsChineseLocalization;
-  });
-}
-
-async function buildLlmCandidatePois(request: TripRequest, llmConfig: LlmProviderConfig, desiredCount: number) {
+) {
   const isLocalOllama = isLikelyOllamaBaseUrl(llmConfig.baseUrl);
   const apiKey = decryptString(llmConfig.apiKeyEncrypted);
   const attempts = isLocalOllama ? 2 : 1;
@@ -542,84 +967,36 @@ async function buildLlmCandidatePois(request: TripRequest, llmConfig: LlmProvide
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const raw = await requestStructuredJson({
+      const raw = await requestStructuredJsonWithTools({
         baseUrl: llmConfig.baseUrl,
         apiKey,
         model: llmConfig.model,
         temperature: isLocalOllama
           ? Math.min(llmConfig.temperature, attempt === 0 ? 0.2 : 0.1)
           : Math.min(llmConfig.temperature, 0.4),
-        maxTokens: isLocalOllama ? 1_400 : undefined,
+        maxTokens: isLocalOllama ? 2_200 : undefined,
         reasoningEffort: isLocalOllama ? "none" : undefined,
         schema: z.unknown(),
         systemPrompt: buildPoiResearchSystemPrompt(),
         userPrompt: buildPoiResearchUserPrompt(request, desiredCount),
-        retries: isLocalOllama ? 0 : 1
+        retries: isLocalOllama ? 0 : 1,
+        maxSteps: isLocalOllama ? 10 : 8,
+        tools: createWebResearchTools(request.destination)
       });
       const parsed = z.object({
         pois: z.array(relaxedPoiSchema).min(1).max(40)
       }).parse(normalizePoiResearchPayload(raw));
 
       const normalized = parsed.pois.map((poi: RelaxedPoi, index: number) =>
-        toPoiFromRelaxed(poi, request, index)
+        toPoiFromRelaxed(poi, request, index, undefined, options?.fallbackGeoAnchor)
       );
       const cleaned = cleanLlmFallbackPois(request, normalized, {
         requireLocalizedDisplayName: !isLocalOllama
       });
 
       if (cleaned.length === 0) {
-        lastError = new Error("The model returned no usable POIs after filtering.");
+        lastError = new Error("The model researched the web but returned no usable POIs.");
         continue;
-      }
-
-      if (!isLocalOllama || !shouldVerifyLocalCandidates(request, cleaned)) {
-        const finalized = cleanLlmFallbackPois(request, cleaned, {
-          requireLocalizedDisplayName: true
-        });
-        if (finalized.length > 0) {
-          return finalized;
-        }
-
-        lastError = new Error("The model returned POIs, but none passed final localization checks.");
-        continue;
-      }
-
-      try {
-        const verifiedRaw = await requestStructuredJson({
-          baseUrl: llmConfig.baseUrl,
-          apiKey,
-          model: llmConfig.model,
-          temperature: Math.min(llmConfig.temperature, 0.1),
-          maxTokens: 1_200,
-          reasoningEffort: "none",
-          schema: z.unknown(),
-          systemPrompt: buildPoiVerifierSystemPrompt(),
-          userPrompt: buildPoiVerifierUserPrompt(
-            request,
-            cleaned.map((poi) => serializePoiForVerifier(poi))
-          ),
-          timeoutMs: 45_000,
-          retries: 0
-        });
-        const verified = z.object({
-          pois: z.array(relaxedPoiSchema).max(40)
-        }).parse(normalizePoiResearchPayload(verifiedRaw));
-        const candidateLookup = createCandidateLookup(cleaned);
-        const vetted = cleanLlmFallbackPois(
-          request,
-          verified.pois.map((poi: RelaxedPoi, index: number) =>
-            toPoiFromRelaxed(poi, request, index, candidateLookup)
-          ),
-          {
-            requireLocalizedDisplayName: true
-          }
-        );
-
-        if (vetted.length > 0) {
-          return vetted;
-        }
-      } catch {
-        // Fall through to final strict cleanup and retry if needed.
       }
 
       const finalized = cleanLlmFallbackPois(request, cleaned, {
@@ -629,7 +1006,7 @@ async function buildLlmCandidatePois(request: TripRequest, llmConfig: LlmProvide
         return finalized;
       }
 
-      lastError = new Error("The model returned POIs, but none passed final localization checks.");
+      lastError = new Error("The model researched the web, but none of the returned POIs passed final validation.");
     } catch (error) {
       lastError = error;
     }
@@ -668,13 +1045,19 @@ function normalizeLlmItinerary(
         containsCjk(heuristicItem.poi.name)
           ? heuristicItem.poi
           : poi;
-      const startTime = parsedItem.startTime ?? heuristicItem?.startTime ?? "09:00";
+      const fallbackStartTime = heuristicItem?.startTime ?? "09:00";
+      const startTime = normalizeTimeValue(parsedItem.startTime ?? fallbackStartTime, fallbackStartTime, {
+        prefer: "first"
+      });
       const durationMinutes =
         parsedItem.durationMinutes ??
         heuristicItem?.durationMinutes ??
         resolvedPoi.recommendedDurationMinutes ??
         90;
-      const endTime = parsedItem.endTime ?? addMinutesToTime(startTime, durationMinutes);
+      const fallbackEndTime = addMinutesToTime(startTime, durationMinutes);
+      const endTime = normalizeTimeValue(parsedItem.endTime ?? fallbackEndTime, fallbackEndTime, {
+        prefer: "last"
+      });
       const localizedCategory =
         preferLocalizedText(
           request,
@@ -760,6 +1143,15 @@ export async function planTrip(options: PlanTripOptions) {
   const geoProvider = createGeoProvider();
   const baseIssues = derivePlanningIssues(options.request, geoProvider.name);
   const desiredCandidateCount = Math.max(options.request.days * 6, 8);
+  const minimumUsableCandidateCount = getMinimumUsableCandidateCount(options.request);
+  const planningDestination = resolvePlanningDestination(options.request.destination);
+  const planningRequest =
+    normalizeDestinationTerm(planningDestination) === normalizeDestinationTerm(options.request.destination)
+      ? options.request
+      : {
+          ...options.request,
+          destination: planningDestination
+        };
 
   emit(options.onProgress, {
     stage: "candidates",
@@ -770,32 +1162,155 @@ export async function planTrip(options: PlanTripOptions) {
     )
   });
 
-  let candidates =
-    geoProvider.name === "mock"
-      ? []
-      : await geoProvider.searchPois({
-          destination: options.request.destination,
-          tags: [...options.request.interests, "美食", "城市地标"],
-          radius: 12000
-        });
-  let candidateSource = geoProvider.name;
+  const coreCitySeeds =
+    geoProvider.name === "amap" ? [] : getCoreCitySeedPois(planningRequest.destination);
+  let providerSearchError: unknown;
+  let candidates: Poi[] = [];
 
-  if (geoProvider.name === "wikimedia" && candidates.length > 0) {
+  if (geoProvider.name !== "fallback" && geoProvider.name !== "mock") {
+    try {
+      candidates = await geoProvider.searchPois({
+        destination: planningRequest.destination,
+        tags: [...options.request.interests, "美食", "城市地标"],
+        radius: 12000
+      });
+      candidates = sanitizeCandidatePool(planningRequest, candidates, baseIssues);
+    } catch (error) {
+      providerSearchError = error;
+    }
+  }
+
+  let candidateSource = geoProvider.name;
+  const isModelResearchProvider = geoProvider.name === "fallback" || geoProvider.name === "mock";
+
+  if (isModelResearchProvider && !options.llmConfig?.enabled && coreCitySeeds.length > 0) {
+    candidates = mergeCandidatePools(planningRequest.destination, candidates, coreCitySeeds);
+    candidateSource = "core-city-seeds";
     baseIssues.push({
       severity: "warning",
-      code: "online-guide-source",
+      code: "core-city-seed-fallback",
       message: localizeForRequest(
         options.request,
-        "POI candidates were collected from live online travel guides.",
-        "候选点来自在线公开旅行资料。"
+        `Live web research is unavailable for ${planningRequest.destination}, so planning used curated city seed POIs.`,
+        `${planningRequest.destination} \u5f53\u524d\u65e0\u6cd5\u8fdb\u884c\u5b9e\u65f6\u8054\u7f51\u8c03\u7814\uff0c\u5df2\u6539\u7528\u5185\u7f6e\u57ce\u5e02\u79cd\u5b50\u70b9\u7ee7\u7eed\u89c4\u5212\u3002`
       ),
       source: "candidate-builder",
       suggestion: localizeForRequest(
         options.request,
-        "Opening hours and travel times can still drift; configure AMAP_API_KEY if you need map-grade precision.",
-        "营业时间与通勤仍可能变动；如需更高精度，可再配置 AMAP_API_KEY。"
+        "Enable a compatible LLM or configure AMAP_API_KEY if you want fresher online candidates.",
+        "\u5982\u9700\u66f4\u65b0\u7684\u5b9e\u65f6\u5019\u9009\u70b9\uff0c\u8bf7\u542f\u7528\u517c\u5bb9\u7684 LLM \u6216\u914d\u7f6e AMAP_API_KEY\u3002"
       )
     });
+  }
+
+  if (providerSearchError && geoProvider.name !== "wikimedia") {
+    throw new Error(
+      localizeForRequest(
+        options.request,
+        `Failed to collect candidate places from ${geoProvider.name}: ${providerSearchError instanceof Error ? providerSearchError.message : "Unknown error."}`,
+        `从 ${geoProvider.name} 收集候选点失败：${providerSearchError instanceof Error ? providerSearchError.message : "未知错误。"}`
+      )
+    );
+  }
+
+  if (geoProvider.name === "wikimedia") {
+    if (providerSearchError || candidates.length === 0) {
+      if (coreCitySeeds.length > 0) {
+        candidates = mergeCandidatePools(planningRequest.destination, candidates, coreCitySeeds);
+        candidateSource = "core-city-seeds";
+        baseIssues.push({
+          severity: "warning",
+          code: "core-city-seed-fallback",
+              message: providerSearchError
+            ? localizeForRequest(
+                options.request,
+                `Live online lookup for ${planningRequest.destination} failed, so planning fell back to curated city seed POIs: ${providerSearchError instanceof Error ? providerSearchError.message : "Unknown error."}`,
+                `${planningRequest.destination} 的在线候选点检索失败，已改用内置城市种子点继续规划：${providerSearchError instanceof Error ? providerSearchError.message : "未知错误。"}`
+              )
+            : localizeForRequest(
+                options.request,
+                `Live online lookup returned no usable POIs for ${planningRequest.destination}, so planning used curated city seed POIs.`,
+                `${planningRequest.destination} 的在线检索没有返回可用候选点，已改用内置城市种子点继续规划。`
+              ),
+          source: "candidate-builder",
+          suggestion: localizeForRequest(
+            options.request,
+            "You can continue planning now. Re-plan later if you want fresher opening hours or more variety from live sources.",
+            "当前可以先继续规划；如需更新的营业时间或更多实时候选点，稍后可再重排一次。"
+          )
+        });
+      } else if (providerSearchError) {
+        throw new Error(
+          localizeForRequest(
+            options.request,
+            `Failed to collect candidate places from ${geoProvider.name}: ${providerSearchError instanceof Error ? providerSearchError.message : "Unknown error."}`,
+            `从 ${geoProvider.name} 收集候选点失败：${providerSearchError instanceof Error ? providerSearchError.message : "未知错误。"}`
+          )
+        );
+      }
+    } else {
+      baseIssues.push({
+        severity: "warning",
+        code: "online-guide-source",
+        message: localizeForRequest(
+          options.request,
+          "POI candidates were collected from live online travel guides.",
+          "候选点来自在线公开旅行资料。"
+        ),
+        source: "candidate-builder",
+        suggestion: localizeForRequest(
+          options.request,
+          "Opening hours and travel times can still drift; configure AMAP_API_KEY if you need map-grade precision.",
+          "营业时间与通勤仍可能变动；如需更高精度，可再配置 AMAP_API_KEY。"
+        )
+      });
+
+      if (coreCitySeeds.length > 0) {
+        const missingInterestCoverageBeforeSeeds = getMissingInterestCoverage(options.request, candidates);
+  const mergedCandidates = mergeCandidatePools(planningRequest.destination, candidates, coreCitySeeds);
+        const missingInterestCoverageAfterSeeds = getMissingInterestCoverage(options.request, mergedCandidates);
+        const repairedCoverageBySeeds =
+          missingInterestCoverageAfterSeeds.length < missingInterestCoverageBeforeSeeds.length;
+        const repairedDepthBySeeds =
+          candidates.length < minimumUsableCandidateCount &&
+          mergedCandidates.length >= minimumUsableCandidateCount;
+
+        if (
+          mergedCandidates.length > candidates.length &&
+          (repairedCoverageBySeeds || repairedDepthBySeeds)
+        ) {
+          candidates = mergedCandidates;
+          baseIssues.push({
+            severity: "warning",
+            code: "core-city-seed-supplement",
+            message: repairedCoverageBySeeds
+              ? localizeForRequest(
+                  options.request,
+                  `The live candidate set for ${planningRequest.destination} missed ${missingInterestCoverageBeforeSeeds.join(", ")}, so curated city seed POIs were merged in.`,
+                  `${planningRequest.destination} 的在线候选点未覆盖这些兴趣：${missingInterestCoverageBeforeSeeds.join("、")}，已并入内置城市种子点补齐。`
+                )
+              : localizeForRequest(
+                  options.request,
+                  `The live candidate set for ${planningRequest.destination} was too thin for a stable itinerary, so curated city seed POIs were merged in.`,
+                  `${planningRequest.destination} 的在线候选点数量偏薄，已并入内置城市种子点提高规划稳定性。`
+                ),
+            source: "candidate-builder",
+            suggestion:
+              missingInterestCoverageAfterSeeds.length === 0
+                ? localizeForRequest(
+                    options.request,
+                    "Coverage is now stable, but you should still spot-check names and opening hours.",
+                    "当前候选点覆盖已稳定，但仍建议抽查地点名称与营业时间。"
+                  )
+                : localizeForRequest(
+                    options.request,
+                    `Some interests are still thin after merging city seed POIs: ${missingInterestCoverageAfterSeeds.join(", ")}.`,
+                    `并入内置城市种子点后，这些兴趣仍然偏弱：${missingInterestCoverageAfterSeeds.join("、")}。`
+                  )
+          });
+        }
+      }
+    }
   }
 
   if (geoProvider.name === "mock") {
@@ -811,20 +1326,30 @@ export async function planTrip(options: PlanTripOptions) {
 
       try {
         const llmCandidates = await buildLlmCandidatePois(
-          options.request,
+          planningRequest,
           options.llmConfig,
           desiredCandidateCount
         );
 
         if (llmCandidates.length > 0) {
           candidates = llmCandidates;
-          candidateSource = "llm-fallback";
+          candidates = sanitizeCandidatePool(planningRequest, candidates, baseIssues);
+          if (candidates.length === 0) {
+            throw new Error(
+              localizeForRequest(
+                options.request,
+                "No map provider is configured, and the model only returned out-of-area POIs.",
+                "当前未配置地图数据，模型返回的候选点全部偏离目的地。"
+              )
+            );
+          }
+          candidateSource = "llm-web-research";
           baseIssues.push({
             severity: "warning",
-            code: "llm-poi-fallback",
+            code: "llm-web-research-source",
             message: localizeForRequest(
               options.request,
-              "Map data is unavailable, so POI candidates were generated by the LLM.",
+              "Map data is unavailable, so the configured LLM researched online sources to collect POI candidates.",
               "当前未接入地图数据，因此候选点由模型生成。"
             ),
             source: "candidate-builder",
@@ -869,17 +1394,123 @@ export async function planTrip(options: PlanTripOptions) {
     }
   }
 
+  const missingInterestCoverage = getMissingInterestCoverage(options.request, candidates);
+  if (missingInterestCoverage.length > 0 && options.llmConfig?.enabled) {
+    emit(options.onProgress, {
+      stage: "candidates",
+      message: localizeForRequest(
+        options.request,
+        `Candidate coverage is missing ${missingInterestCoverage.join(", ")}. Running a targeted model lookup to supplement those interests.`,
+        `当前候选点缺少这些兴趣：${missingInterestCoverage.join("、")}，正在定向补充候选点。`
+      )
+    });
+
+    try {
+      const supplementalCandidates = await buildLlmCandidatePois(
+        {
+          ...planningRequest,
+          interests: missingInterestCoverage,
+          mustVisit: [],
+          hotelArea: undefined,
+          notes: undefined
+        },
+        options.llmConfig,
+        Math.max(missingInterestCoverage.length * 4, 6),
+        {
+          fallbackGeoAnchor: getPoiCentroid(candidates)
+        }
+      );
+
+      const previousCandidateCount = candidates.length;
+       const mergedCandidates = mergeCandidatePools(
+         planningRequest.destination,
+         candidates,
+         supplementalCandidates
+       );
+      const sanitizedMergedCandidates = sanitizeCandidatePool(
+        planningRequest,
+        mergedCandidates,
+        baseIssues
+      );
+
+      if (sanitizedMergedCandidates.length > previousCandidateCount) {
+        candidates = sanitizedMergedCandidates;
+
+        candidateSource =
+          previousCandidateCount === 0 && isModelResearchProvider
+            ? "llm-web-research"
+            : "hybrid-supplement";
+
+        const remainingMissingInterests = getMissingInterestCoverage(options.request, candidates);
+        const isPrimaryWebResearch = previousCandidateCount === 0 && isModelResearchProvider;
+        baseIssues.push({
+          severity: "warning",
+          code: isPrimaryWebResearch ? "llm-web-research-source" : "interest-coverage-supplement",
+          message: localizeForRequest(
+            options.request,
+            isPrimaryWebResearch
+              ? "POI candidates were researched online by the configured LLM."
+              : `The initial candidate set missed ${missingInterestCoverage.join(", ")}, so a targeted model supplement was added.`,
+            `首轮候选点未覆盖这些兴趣：${missingInterestCoverage.join("、")}，已追加模型补点。`
+          ),
+          source: "candidate-builder",
+          suggestion:
+            remainingMissingInterests.length === 0
+              ? localizeForRequest(
+                  options.request,
+                  isPrimaryWebResearch
+                    ? "Spot-check names and opening hours, or configure AMAP_API_KEY if you need map-grade precision."
+                    : "Coverage has been repaired, but you should still spot-check names and opening hours.",
+                  "当前兴趣覆盖已补齐，但仍建议抽查地点名称与营业时间。"
+                )
+              : localizeForRequest(
+                  options.request,
+                  `Some interests are still thin after supplementation: ${remainingMissingInterests.join(", ")}.`,
+                  `补点后这些兴趣仍然偏弱：${remainingMissingInterests.join("、")}。`
+                )
+        });
+      }
+    } catch (error) {
+      baseIssues.push({
+        severity: "warning",
+        code: "interest-coverage-supplement-failed",
+        message: localizeForRequest(
+          options.request,
+          `A targeted model supplement for ${missingInterestCoverage.join(", ")} failed: ${error instanceof Error ? error.message : "Unknown error."}`,
+          `针对这些兴趣的定向补点失败：${missingInterestCoverage.join("、")}。${error instanceof Error ? error.message : "未知错误。"}`
+        ),
+        source: "candidate-builder",
+        suggestion: localizeForRequest(
+          options.request,
+          "Try planning again, switch models, or simplify the requested interests.",
+          "请重试规划、切换模型，或适当减少兴趣要求。"
+        )
+      });
+    }
+  }
+
+  candidates = supplementCandidatesWithCoreCitySeeds({
+    request: options.request,
+    destination: planningRequest.destination,
+    candidates,
+    coreCitySeeds,
+    minimumUsableCandidateCount,
+    issues: baseIssues
+  });
+
   if (candidates.length === 0) {
     throw new Error(
       localizeForRequest(
         options.request,
-        "No usable candidate places were found for this request. Adjust the destination or model settings and try again.",
+        isModelResearchProvider && options.llmConfig?.enabled
+          ? "The LLM web researcher did not return any usable candidate places. Try another model, simplify the interests, or configure AMAP_API_KEY."
+          : "No usable candidate places were found for this request. Adjust the destination or model settings and try again.",
         "没有找到可用的候选点，请调整目的地或模型配置后重试。"
       )
     );
   }
 
-  const ranked = scoreCandidates(options.request, candidates);
+  const ranked = scoreCandidates(planningRequest, candidates);
   const chosen = selectDiverseCandidates(options.request, ranked, desiredCandidateCount);
   assertCandidateCoverage(options.request, chosen);
   const chosenRanked = chosen.map((poi) => ranked.find((entry) => entry.poi.id === poi.id) ?? { poi, score: 0 });
@@ -934,7 +1565,7 @@ export async function planTrip(options: PlanTripOptions) {
       );
     } catch (error) {
       const shouldSuppressRefinementIssue =
-        candidateSource === "wikimedia" && isLikelyOllamaBaseUrl(options.llmConfig.baseUrl);
+        candidateSource === "llm-web-research" && isLikelyOllamaBaseUrl(options.llmConfig.baseUrl);
 
       if (!shouldSuppressRefinementIssue) {
         baseIssues.push({
@@ -979,11 +1610,15 @@ export async function planTrip(options: PlanTripOptions) {
 
   const repaired = repairItinerary(itinerary);
   const mergedIssues = mergeIssues(itinerary.issues, repaired.issues);
+  const repairedItinerary = {
+    ...repaired.itinerary,
+    issues: mergedIssues
+  };
+  const enrichedItinerary = options.skipPoiImageEnrichment
+    ? repairedItinerary
+    : await enrichItineraryPoiImages(repairedItinerary);
   return {
-    itinerary: {
-      ...repaired.itinerary,
-      issues: mergedIssues
-    },
+    itinerary: enrichedItinerary,
     issues: mergedIssues
   };
 }
@@ -1035,10 +1670,20 @@ export async function replanUnlockedSegments(options: ReplanOptions) {
   const fresh = await planTrip({
     request: options.request,
     llmConfig: options.llmConfig,
-    onProgress: options.onProgress
+    onProgress: options.onProgress,
+    skipPoiImageEnrichment: true
   });
 
-  return mergeLockedItems(fresh.itinerary, collectLockedItems(options.currentItinerary));
+  const merged = mergeLockedItems(fresh.itinerary, collectLockedItems(options.currentItinerary));
+  const enrichedItinerary = await enrichItineraryPoiImages({
+    ...merged.itinerary,
+    issues: merged.issues
+  });
+
+  return {
+    itinerary: enrichedItinerary,
+    issues: merged.issues
+  };
 }
 
 export function validateEditedItinerary(itinerary: Itinerary) {

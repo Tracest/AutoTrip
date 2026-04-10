@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   AlertTriangle,
   CalendarDays,
@@ -14,7 +15,7 @@ import {
   Sparkles,
   Trash2
 } from "lucide-react";
-import { startTransition, useEffect, useState, type ReactNode } from "react";
+import { startTransition, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   closestCenter,
   DndContext,
@@ -31,6 +32,11 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { DEFAULT_OLLAMA_BASE_URL, isLikelyOllamaBaseUrl } from "@/lib/llm/provider-utils";
+import {
+  isSupportedPlanningDestination,
+  supportedDestinationGroups,
+  SUPPORTED_DESTINATION_COUNT
+} from "@/lib/planning/supported-destinations";
 import { repairItinerary } from "@/lib/planning/validator";
 import type {
   Itinerary,
@@ -43,11 +49,13 @@ import type {
 } from "@/lib/schemas/trip";
 import type { LlmSettingsResponse } from "@/lib/schemas/llm";
 import { cn } from "@/lib/utils/cn";
+import { getMeaningfulPoiAddress } from "@/lib/utils/poi-address";
 
 type DashboardClientProps = {
   userEmail: string;
   initialConfig: LlmSettingsResponse;
   initialTrips: TripSummary[];
+  initialSelectedTrip?: TripDetail | null;
 };
 
 type StreamEvent =
@@ -78,10 +86,16 @@ type StatusBadgeProps = {
   tone?: "default" | "accent" | "pine";
 };
 
+type DestinationPickerProps = {
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+};
+
 const interestOptions = ["历史", "博物馆", "自然", "美食", "夜景", "亲子", "建筑", "拍照"];
 
 const defaultTripRequest: TripRequest = {
-  destination: "上海",
+  destination: "",
   startDate: new Date().toISOString().slice(0, 10),
   days: 3,
   travelers: 2,
@@ -145,18 +159,24 @@ function formatBudget(value: TripRequest["budget"]) {
   }
 }
 
-function formatCandidateSource(source?: string) {
+function formatCandidateSourceLabel(source?: string) {
   switch (source) {
     case "amap":
-      return "高德地图";
+      return "\u9ad8\u5fb7\u5730\u56fe";
+    case "llm-web-research":
+      return "\u6a21\u578b\u8054\u7f51\u8c03\u7814";
     case "wikimedia":
-      return "联网检索（Wikimedia）";
+      return "\u8054\u7f51\u68c0\u7d22\uff08Wikimedia\uff09";
+    case "core-city-seeds":
+      return "\u5185\u7f6e\u57ce\u5e02\u79cd\u5b50\u70b9";
+    case "hybrid-supplement":
+      return "\u591a\u6e90\u5019\u9009\u70b9 + \u8865\u70b9\u517c\u5bb9";
     case "llm-fallback":
-      return "本地模型候选点 + 规则排程";
+      return "\u6a21\u578b\u5019\u9009\u70b9";
     case "mock":
-      return "占位 Mock 数据";
+      return "Mock \u6570\u636e";
     default:
-      return source ?? "未知";
+      return source ?? "\u672a\u77e5";
   }
 }
 
@@ -188,12 +208,24 @@ async function parseNdjson(response: Response, onEvent: (event: StreamEvent) => 
 
     for (const line of lines) {
       if (!line.trim()) continue;
-      onEvent(JSON.parse(line) as StreamEvent);
+      try {
+        onEvent(JSON.parse(line) as StreamEvent);
+      } catch (error) {
+        throw new Error(
+          `Failed to parse planning stream: ${error instanceof Error ? error.message : "Unknown parse error."}`
+        );
+      }
     }
   }
 
   if (buffer.trim()) {
-    onEvent(JSON.parse(buffer) as StreamEvent);
+    try {
+      onEvent(JSON.parse(buffer) as StreamEvent);
+    } catch (error) {
+      throw new Error(
+        `Failed to parse planning stream: ${error instanceof Error ? error.message : "Unknown parse error."}`
+      );
+    }
   }
 }
 
@@ -248,6 +280,23 @@ function moveItemAcrossDays(days: ItineraryDay[], activeId: string, overId: stri
   });
 }
 
+function getPoiMetaLine(item: ItineraryItem) {
+  const address = getMeaningfulPoiAddress({
+    address: item.poi.address,
+    city: item.poi.city
+  });
+
+  if (address) {
+    return address;
+  }
+
+  if (item.poi.openingHoursText) {
+    return `营业时间参考：${item.poi.openingHoursText}`;
+  }
+
+  return null;
+}
+
 function toggleItemLock(itinerary: Itinerary, itemId: string) {
   return recomputeItinerary({
     ...itinerary,
@@ -292,6 +341,112 @@ function StatusBadge({ label, value, tone = "default" }: StatusBadgeProps) {
     <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium", toneClass)}>
       <span className="text-slate-400">{label}</span>
       <span>{value}</span>
+    </div>
+  );
+}
+
+function DestinationPicker({ value, onChange, disabled = false }: DestinationPickerProps) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current || !(event.target instanceof Node) || rootRef.current.contains(event.target)) {
+        return;
+      }
+
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const selectedLabel = value || "请选择城市";
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        className={cn(
+          fieldClass,
+          "flex items-center justify-between gap-3 text-left",
+          !value && "text-slate-400"
+        )}
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="truncate">{selectedLabel}</span>
+        <ChevronDown className={cn("h-4 w-4 shrink-0 text-slate-400 transition", open && "rotate-180")} />
+      </button>
+
+      {open ? (
+        <div className="absolute left-0 right-0 z-30 mt-2 overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_20px_40px_rgba(15,23,42,0.14)]">
+          <div className="border-b border-slate-100 px-4 py-3">
+            <p className="text-sm font-medium text-slate-700">按 A-Z 选择城市</p>
+            <p className="mt-1 text-xs text-slate-500">{SUPPORTED_DESTINATION_COUNT} 个大城市</p>
+          </div>
+
+          <div className="max-h-72 overflow-y-auto p-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              {supportedDestinationGroups.map((group) => (
+                <section key={group.letter} className="rounded-[18px] border border-slate-100 bg-slate-50/80 p-2.5">
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-xs font-semibold text-slate-500">
+                      {group.letter}
+                    </span>
+                    <span className="text-xs text-slate-400">{group.options.length} 城市</span>
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5">
+                    {group.options.map((option) => {
+                      const isSelected = option.value === value;
+
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={cn(
+                            "rounded-xl px-2.5 py-1.5 text-sm transition",
+                            isSelected
+                              ? "bg-accent text-white shadow-[0_8px_18px_rgba(15,136,114,0.18)]"
+                              : "bg-white text-slate-700 hover:border-accent/20 hover:bg-accent/5 hover:text-accent"
+                          )}
+                          onClick={() => {
+                            onChange(option.value);
+                            setOpen(false);
+                          }}
+                          role="option"
+                          aria-selected={isSelected}
+                        >
+                          {option.value}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -347,6 +502,52 @@ function SortableItem({
     transform: CSS.Transform.toString(transform),
     transition
   };
+  const poiMetaLine = getPoiMetaLine(item);
+  const poiImage = item.poi.image;
+  const imageWidth = poiImage?.width ?? 320;
+  const imageHeight = poiImage?.height ?? 240;
+  const imageSourceUrl = poiImage?.sourcePageUrl ?? item.poi.sourcePageUrl;
+  // Wikimedia thumbnails are already sized and can rate-limit Next's server-side optimizer.
+  const shouldBypassImageOptimization = poiImage?.provider === "wikimedia";
+  const previewImage = poiImage ? (
+    <div className="shrink-0">
+      {imageSourceUrl ? (
+        <a
+          href={imageSourceUrl}
+          target="_blank"
+          rel="noreferrer noopener"
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          className="group block overflow-hidden rounded-2xl border border-slate-200 bg-white"
+          title="打开 Wikimedia 来源页"
+        >
+          <Image
+            src={poiImage.url}
+            alt={poiImage.alt}
+            width={imageWidth}
+            height={imageHeight}
+            sizes="96px"
+            className="h-20 w-20 object-cover transition duration-300 group-hover:scale-[1.03] sm:h-24 sm:w-24"
+            draggable={false}
+            unoptimized={shouldBypassImageOptimization}
+          />
+        </a>
+      ) : (
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          <Image
+            src={poiImage.url}
+            alt={poiImage.alt}
+            width={imageWidth}
+            height={imageHeight}
+            sizes="96px"
+            className="h-20 w-20 object-cover sm:h-24 sm:w-24"
+            draggable={false}
+            unoptimized={shouldBypassImageOptimization}
+          />
+        </div>
+      )}
+    </div>
+  ) : null;
 
   return (
     <article
@@ -359,49 +560,70 @@ function SortableItem({
       {...attributes}
       {...listeners}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400">
-            <GripVertical className="h-4 w-4" />
+      <div className="flex gap-3">
+        {previewImage}
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400">
+                <GripVertical className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-slate-950">{item.poi.name}</p>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <p className="text-xs uppercase tracking-[0.14em] text-slate-400">{item.category}</p>
+                  {poiImage ? (
+                    <span
+                      className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-500"
+                      title="图片来源：Wikimedia"
+                    >
+                      Wikimedia
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleLock(item.id);
+              }}
+              className={cn(
+                "rounded-full border px-3 py-1.5 text-xs font-medium transition",
+                item.locked
+                  ? "border-pine/25 bg-pine/10 text-pine"
+                  : "border-slate-200 bg-white text-slate-500 hover:border-accent/30 hover:text-accent"
+              )}
+            >
+              <Lock className="mr-1 inline h-3 w-3" />
+              {item.locked ? "已锁定" : "锁定"}
+            </button>
           </div>
-          <div>
-            <p className="text-sm font-semibold text-slate-950">{item.poi.name}</p>
-            <p className="mt-1 text-xs uppercase tracking-[0.14em] text-slate-400">{item.category}</p>
+
+          <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm text-slate-500">
+            <span>
+              {item.startTime} - {item.endTime}
+            </span>
+            <span>{item.durationMinutes} 分钟</span>
+            {item.travelMinutesFromPrevious > 0 ? <span>前往 {item.travelMinutesFromPrevious} 分</span> : null}
           </div>
+
+          {poiMetaLine ? <p className="mt-3 text-sm leading-6 text-slate-600">{poiMetaLine}</p> : null}
+          {item.notes ? <p className="mt-3 rounded-2xl bg-white px-3 py-2 text-sm leading-6 text-slate-500">{item.notes}</p> : null}
         </div>
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleLock(item.id);
-          }}
-          className={cn(
-            "rounded-full border px-3 py-1.5 text-xs font-medium transition",
-            item.locked
-              ? "border-pine/25 bg-pine/10 text-pine"
-              : "border-slate-200 bg-white text-slate-500 hover:border-accent/30 hover:text-accent"
-          )}
-        >
-          <Lock className="mr-1 inline h-3 w-3" />
-          {item.locked ? "已锁定" : "锁定"}
-        </button>
       </div>
-
-      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm text-slate-500">
-        <span>
-          {item.startTime} - {item.endTime}
-        </span>
-        <span>{item.durationMinutes} 分钟</span>
-        {item.travelMinutesFromPrevious > 0 ? <span>前往 {item.travelMinutesFromPrevious} 分</span> : null}
-      </div>
-
-      <p className="mt-3 text-sm leading-6 text-slate-600">{item.poi.address}</p>
-      {item.notes ? <p className="mt-3 rounded-2xl bg-white px-3 py-2 text-sm leading-6 text-slate-500">{item.notes}</p> : null}
     </article>
   );
 }
 
-export function DashboardClient({ userEmail, initialConfig, initialTrips }: DashboardClientProps) {
+export function DashboardClient({
+  userEmail,
+  initialConfig,
+  initialTrips,
+  initialSelectedTrip = null
+}: DashboardClientProps) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [tripForm, setTripForm] = useState<TripRequest>(defaultTripRequest);
   const [config, setConfig] = useState({
@@ -417,15 +639,17 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   const [configStatus, setConfigStatus] = useState(
     initialConfig.configured ? "模型已配置，可以直接开始规划。" : "默认推荐本地 Ollama。填写模型名后保存即可开始规划。"
   );
-  const [planningStatus, setPlanningStatus] = useState("先完成模型配置，然后填写需求并开始规划。");
+  const [planningStatus, setPlanningStatus] = useState(
+    initialSelectedTrip ? "已加载最新历史行程，可以继续检查、拖拽和保存。" : "先完成模型配置，然后填写需求并开始规划。"
+  );
   const [configExpanded, setConfigExpanded] = useState(!initialConfig.configured);
   const [tripAdvancedExpanded, setTripAdvancedExpanded] = useState(false);
   const [tripSummaries, setTripSummaries] = useState<TripSummary[]>(initialTrips);
-  const [selectedTrip, setSelectedTrip] = useState<TripDetail | null>(null);
+  const [selectedTrip, setSelectedTrip] = useState<TripDetail | null>(initialSelectedTrip);
   const [loadingTripId, setLoadingTripId] = useState<string | null>(null);
   const [deletingTripId, setDeletingTripId] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
-  const [workspaceIssues, setWorkspaceIssues] = useState<PlanningIssue[]>([]);
+  const [workspaceIssues, setWorkspaceIssues] = useState<PlanningIssue[]>(initialSelectedTrip?.itinerary.issues ?? []);
   const [availableModels, setAvailableModels] = useState<string[]>(
     initialConfig.model ? [initialConfig.model] : []
   );
@@ -441,6 +665,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   const canReuseSavedApiKey = hasStoredApiKey && lastSavedBaseUrl === config.baseUrl;
   const modelChoices = Array.from(new Set([...availableModels, ...(config.model ? [config.model] : [])]));
   const canPlan = tripForm.destination.trim().length > 0 && tripForm.interests.length > 0 && !isBusy && hasSavedConfig;
+  const selectedTripSupportsReplan = !selectedTrip || isSupportedPlanningDestination(selectedTrip.request.destination);
   const planningButtonLabel = isBusy ? "规划中..." : "开始规划路线";
   const planningChecklist = [
     `目的地 ${tripForm.destination || "未填写"}`,
@@ -457,7 +682,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
       : "尚未完成模型配置";
 
   useEffect(() => {
-    if (initialTrips[0]) {
+    if (!initialSelectedTrip && initialTrips[0]) {
       void loadTrip(initialTrips[0].id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -633,50 +858,73 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
   async function planTrip() {
     setIsBusy(true);
     setPlanningStatus("已提交规划请求，正在连接规划引擎...");
-    const response = await fetch("/api/trips/plan", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(tripForm)
-    });
+    let receivedTerminalEvent = false;
 
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-      setPlanningStatus(payload?.error ?? "规划失败。");
-      setIsBusy(false);
-      return;
-    }
-
-    await parseNdjson(response, (event) => {
-      if (event.type === "progress") {
-        setPlanningStatus(event.message);
-        return;
-      }
-
-      if (event.type === "error") {
-        setPlanningStatus(event.message);
-        setIsBusy(false);
-        return;
-      }
-
-      setSelectedTrip(event.trip);
-      setWorkspaceIssues(event.trip.itinerary.issues);
-      setTripSummaries((current) => {
-        const next = [event.trip, ...current.filter((trip) => trip.id !== event.trip.id)];
-        return next.map((trip) => ({
-          id: trip.id,
-          title: trip.title,
-          destination: trip.destination,
-          startDate: trip.startDate,
-          days: trip.days,
-          status: trip.status,
-          updatedAt: trip.updatedAt
-        }));
+    try {
+      const response = await fetch("/api/trips/plan", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(tripForm)
       });
-      setPlanningStatus("规划完成，可以继续拖拽调整或保存。");
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as ApiError | null;
+        setPlanningStatus(getApiErrorMessage(payload, "规划失败。"));
+        return;
+      }
+
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("application/x-ndjson")) {
+        const preview = (await response.text().catch(() => "")).trim().slice(0, 180);
+        if (response.redirected || contentType.includes("text/html")) {
+          throw new Error("规划请求返回了登录页或其他网页内容，请先重新登录，然后查看浏览器 Console 和运行终端日志。");
+        }
+
+        throw new Error(preview ? `规划接口返回了意外内容：${preview}` : "规划接口返回了意外内容，请查看日志。");
+      }
+
+      await parseNdjson(response, (event) => {
+        if (event.type === "progress") {
+          setPlanningStatus(event.message);
+          return;
+        }
+
+        receivedTerminalEvent = true;
+
+        if (event.type === "error") {
+          console.error("Trip planning stream returned an error event.", event.message);
+          setPlanningStatus(event.message);
+          return;
+        }
+
+        setSelectedTrip(event.trip);
+        setWorkspaceIssues(event.trip.itinerary.issues);
+        setTripSummaries((current) => {
+          const next = [event.trip, ...current.filter((trip) => trip.id !== event.trip.id)];
+          return next.map((trip) => ({
+            id: trip.id,
+            title: trip.title,
+            destination: trip.destination,
+            startDate: trip.startDate,
+            days: trip.days,
+            status: trip.status,
+            updatedAt: trip.updatedAt
+          }));
+        });
+        setPlanningStatus("规划完成，可以继续拖拽调整或保存。");
+      });
+
+      if (!receivedTerminalEvent) {
+        throw new Error("规划请求已结束，但没有返回可用结果。请查看浏览器 Console 和运行终端日志。");
+      }
+    } catch (error) {
+      console.error("Trip planning failed.", error);
+      setPlanningStatus(error instanceof Error ? error.message : "规划失败，请查看浏览器 Console 和运行终端日志。");
+    } finally {
       setIsBusy(false);
-    });
+    }
   }
 
   async function saveEdits() {
@@ -697,7 +945,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setIsBusy(false);
 
     if (!response.ok || !isTripDetail(payload)) {
-      setPlanningStatus("保存编辑失败。");
+      setPlanningStatus(getApiErrorMessage(isTripDetail(payload) ? null : (payload as ApiError), "保存编辑失败。"));
       return;
     }
 
@@ -718,7 +966,7 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     setIsBusy(false);
 
     if (!response.ok || !isTripDetail(payload)) {
-      setPlanningStatus("重新规划失败。");
+      setPlanningStatus(getApiErrorMessage(isTripDetail(payload) ? null : (payload as ApiError), "重新规划失败。"));
       return;
     }
 
@@ -764,16 +1012,17 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
     ? [
         `目的地 ${selectedTrip.request.destination}`,
         `兴趣 ${selectedTrip.request.interests.join(" / ")}`,
-        `来源 ${formatCandidateSource(selectedTrip.itinerary.metadata.candidateSource)}`,
+        `来源 ${formatCandidateSourceLabel(selectedTrip.itinerary.metadata.candidateSource)}`,
         selectedTrip.request.hotelArea ? `酒店 ${selectedTrip.request.hotelArea}` : null,
         selectedTrip.request.mustVisit.length > 0 ? `必去 ${selectedTrip.request.mustVisit.join(" / ")}` : null
       ].filter((item): item is string => Boolean(item))
     : [];
 
   const workspaceNotes = selectedTrip
-    ? [
+      ? [
         selectedTrip.request.notes ? `补充要求：${selectedTrip.request.notes}` : null,
-        selectedTrip.itinerary.metadata.betaNotice ? `提示：${selectedTrip.itinerary.metadata.betaNotice}` : null
+        selectedTrip.itinerary.metadata.betaNotice ? `提示：${selectedTrip.itinerary.metadata.betaNotice}` : null,
+        !selectedTripSupportsReplan ? "该历史行程的目的地不在当前支持城市名单内，暂不支持一键重排。" : null
       ].filter((item): item is string => Boolean(item))
     : [];
 
@@ -1036,13 +1285,15 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
               <div className="mt-5 space-y-3">
                 <label className="block space-y-2">
                   <span className="text-sm font-medium text-slate-600">目的地</span>
-                  <input
-                    className={fieldClass}
+                  <DestinationPicker
                     value={tripForm.destination}
-                    onChange={(event) => setTripForm((current) => ({ ...current, destination: event.target.value }))}
-                    placeholder="例如：长沙"
+                    onChange={(value) => setTripForm((current) => ({ ...current, destination: value }))}
+                    disabled={isBusy}
                   />
                 </label>
+                <p className="text-xs leading-5 text-slate-500">
+                  {SUPPORTED_DESTINATION_COUNT} 个大城市，固定从列表选择。
+                </p>
 
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="block space-y-2">
@@ -1320,7 +1571,13 @@ export function DashboardClient({ userEmail, initialConfig, initialTrips }: Dash
                     <Save className="mr-2 inline h-4 w-4" />
                     保存编辑
                   </button>
-                  <button type="button" onClick={replanUnlocked} disabled={!selectedTrip || isBusy} className={accentButtonClass}>
+                  <button
+                    type="button"
+                  onClick={replanUnlocked}
+                  disabled={!selectedTrip || isBusy || !selectedTripSupportsReplan}
+                  className={accentButtonClass}
+                  title={!selectedTripSupportsReplan ? "当前仅支持已收录城市的一键重排" : undefined}
+                >
                     <RefreshCcw className="mr-2 inline h-4 w-4" />
                     重排未锁定项目
                   </button>

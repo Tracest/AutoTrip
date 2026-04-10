@@ -1,10 +1,10 @@
 import { prisma } from "@/lib/db/prisma";
 import { requireAdminUser } from "@/lib/auth/guards";
-import { shouldPreferChineseOutput } from "@/lib/planning/destination";
-import { tripRequestSchema } from "@/lib/schemas/trip";
+import { planningTripRequestSchema } from "@/lib/schemas/trip";
 import { planTrip } from "@/lib/planning/engine";
 import { jsonError } from "@/lib/utils/http";
 import { serializeTripDetail } from "@/lib/trips/serialization";
+import { ZodError } from "zod";
 
 type StreamEvent =
   | {
@@ -28,15 +28,30 @@ function line(event: StreamEvent) {
 export async function POST(request: Request) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   let parsedRequest;
   try {
-    parsedRequest = tripRequestSchema.parse(await request.json());
+    parsedRequest = planningTripRequestSchema.parse(await request.json());
   } catch (error) {
-    return jsonError("Invalid trip request.", 400, error instanceof Error ? error.message : error);
+    if (
+      error instanceof ZodError &&
+      error.issues.some((issue) => issue.path[0] === "destination")
+    ) {
+      return jsonError("当前仅支持列表中的大城市，请从下拉列表重新选择目的地。", 400, error.issues);
+    }
+
+    return jsonError("行程请求参数无效。", 400, error instanceof Error ? error.message : error);
   }
+
+  console.info("[trip-plan] Request received.", {
+    userId: user.id,
+    destination: parsedRequest.destination,
+    days: parsedRequest.days,
+    llmBaseUrl: user.llmConfig?.baseUrl ?? null,
+    llmModel: user.llmConfig?.model ?? null
+  });
 
   const encoder = new TextEncoder();
 
@@ -75,9 +90,7 @@ export async function POST(request: Request) {
         send({
           type: "progress",
           stage: "persist",
-          message: shouldPreferChineseOutput(parsedRequest.destination)
-            ? "行程已保存，正在打开可编辑工作区。"
-            : "Trip saved. Opening the editable itinerary workspace."
+          message: "行程已保存，正在打开可编辑工作区。"
         });
 
         send({
@@ -89,11 +102,22 @@ export async function POST(request: Request) {
           })
         });
 
+        console.info("[trip-plan] Trip persisted.", {
+          tripId: persisted.id,
+          userId: user.id,
+          destination: parsedRequest.destination
+        });
+
         controller.close();
       } catch (error) {
+        console.error("[trip-plan] Planning failed.", {
+          userId: user.id,
+          destination: parsedRequest.destination,
+          error
+        });
         send({
           type: "error",
-          message: error instanceof Error ? error.message : "Unknown planning error."
+          message: error instanceof Error ? error.message : "规划过程中发生未知错误。"
         });
         controller.close();
       }

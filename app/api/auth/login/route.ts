@@ -10,7 +10,7 @@ export async function POST(request: Request) {
     const result = await loginOrBootstrap(payload.email, payload.password);
 
     if (!result) {
-      return jsonError("Invalid credentials.", 401);
+      return jsonError("邮箱或密码不正确。", 401);
     }
 
     const response = NextResponse.json({
@@ -31,6 +31,6 @@ export async function POST(request: Request) {
 
     return response;
   } catch (error) {
-    return jsonError("Unable to sign in.", 400, error instanceof Error ? error.message : error);
+    return jsonError("登录失败。", 400, error instanceof Error ? error.message : error);
   }
 }

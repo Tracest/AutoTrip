@@ -8,7 +8,7 @@ import { jsonError, jsonOk } from "@/lib/utils/http";
 export async function GET() {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   const apiKeyOptional = user.llmConfig ? isLikelyOllamaBaseUrl(user.llmConfig.baseUrl) : false;
@@ -33,7 +33,7 @@ export async function GET() {
 export async function PUT(request: Request) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   try {
@@ -50,7 +50,7 @@ export async function PUT(request: Request) {
             : undefined;
 
     if (!encryptedKey) {
-      return jsonError("API key is required the first time you save the LLM settings unless you are using local Ollama.", 400);
+      return jsonError("首次保存模型配置时必须提供 API Key；如果使用本地 Ollama 则可留空。", 400);
     }
 
     const updated = await prisma.llmProviderConfig.upsert({
@@ -87,6 +87,6 @@ export async function PUT(request: Request) {
         apiKeyOptional: isLikelyOllamaBaseUrl(updated.baseUrl)
     });
   } catch (error) {
-    return jsonError("Unable to save LLM settings.", 400, error instanceof Error ? error.message : error);
+    return jsonError("保存模型配置失败。", 400, error instanceof Error ? error.message : error);
   }
 }

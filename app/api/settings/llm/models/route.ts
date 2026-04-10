@@ -13,7 +13,7 @@ const modelListSchema = z.object({
 export async function POST(request: Request) {
   const user = await requireAdminUser();
   if (!user) {
-    return jsonError("Unauthorized.", 401);
+    return jsonError("未授权访问。", 401);
   }
 
   try {
@@ -33,6 +33,6 @@ export async function POST(request: Request) {
 
     return jsonOk(result);
   } catch (error) {
-    return jsonError("Unable to load available models.", 400, error instanceof Error ? error.message : error);
+    return jsonError("加载模型列表失败。", 400, error instanceof Error ? error.message : error);
   }
 }

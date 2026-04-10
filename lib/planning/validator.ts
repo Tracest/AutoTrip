@@ -1,18 +1,10 @@
+import { getPoiDistanceFromDestination, maxDestinationPoiDistanceKm } from "@/lib/planning/destination-geo";
 import type { Itinerary, ItineraryDay, ItineraryItem, PlanningIssue } from "@/lib/schemas/trip";
 import { itinerarySchema } from "@/lib/schemas/trip";
-import { addMinutesToTime } from "@/lib/utils/time";
+import { addMinutesToTime, formatMinutesAsTime, tryParseTimeToMinutes } from "@/lib/utils/time";
 
-function toMinutes(value: string) {
-  const [hours, minutes] = value.split(":").map(Number);
-  return hours * 60 + minutes;
-}
-
-function fromMinutes(value: number) {
-  const hours = Math.floor(value / 60)
-    .toString()
-    .padStart(2, "0");
-  const minutes = (value % 60).toString().padStart(2, "0");
-  return `${hours}:${minutes}`;
+function getSafeStartMinutes(value: string, fallback: number) {
+  return tryParseTimeToMinutes(value, { prefer: "first" }) ?? fallback;
 }
 
 export function validateItinerary(itinerary: Itinerary) {
@@ -34,8 +26,20 @@ export function validateItinerary(itinerary: Itinerary) {
       }
       seenPoiIds.add(item.poi.id);
 
-      const start = toMinutes(item.startTime);
-      const end = toMinutes(item.endTime);
+      const parsedStart = tryParseTimeToMinutes(item.startTime, { prefer: "first" });
+      const parsedEnd = tryParseTimeToMinutes(item.endTime, { prefer: "last" });
+      const start = parsedStart ?? previousEnd;
+      const end = parsedEnd ?? start + item.durationMinutes;
+
+      if (parsedStart === null || parsedEnd === null) {
+        issues.push({
+          severity: "error",
+          code: "invalid-time-format",
+          message: `${item.poi.name} has an invalid time format.`,
+          source: `day-${dayIndex + 1}-item-${itemIndex + 1}`,
+          suggestion: "Use 24-hour HH:mm times such as 09:30."
+        });
+      }
 
       if (start < previousEnd) {
         issues.push({
@@ -54,6 +58,20 @@ export function validateItinerary(itinerary: Itinerary) {
           message: `${item.poi.name} has an unusually long transfer time.`,
           source: `day-${dayIndex + 1}-item-${itemIndex + 1}`,
           suggestion: "Consider regrouping the day by area."
+        });
+      }
+
+      const distanceFromDestinationKm = getPoiDistanceFromDestination(itinerary.request.destination, item.poi);
+      if (
+        distanceFromDestinationKm !== null &&
+        distanceFromDestinationKm > maxDestinationPoiDistanceKm
+      ) {
+        issues.push({
+          severity: "warning",
+          code: "destination-outlier",
+          message: `${item.poi.name} appears far away from ${itinerary.request.destination}.`,
+          source: `day-${dayIndex + 1}-item-${itemIndex + 1}`,
+          suggestion: "Remove or unlock this stop, then replan around places closer to the destination."
         });
       }
 
@@ -91,13 +109,14 @@ export function repairItinerary(itinerary: Itinerary) {
         return true;
       })
       .map((item, index): ItineraryItem => {
-        const startMinutes = Math.max(currentMinutes + item.travelMinutesFromPrevious, toMinutes(item.startTime));
+        const desiredStart = getSafeStartMinutes(item.startTime, currentMinutes);
+        const startMinutes = Math.max(currentMinutes + item.travelMinutesFromPrevious, desiredStart);
         const endMinutes = startMinutes + item.durationMinutes;
         currentMinutes = endMinutes + (index === 1 ? 60 : 20);
         return {
           ...item,
-          startTime: fromMinutes(startMinutes),
-          endTime: addMinutesToTime(fromMinutes(startMinutes), item.durationMinutes)
+          startTime: formatMinutesAsTime(startMinutes),
+          endTime: addMinutesToTime(formatMinutesAsTime(startMinutes), item.durationMinutes)
         };
       });
 

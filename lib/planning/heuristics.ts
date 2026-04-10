@@ -26,6 +26,7 @@ export type CandidateScore = {
 const defaultCategoryLabel = "景点";
 const lunchBreakNote = "建议在附近安排午餐或咖啡休息。";
 const firstDayTitle = "城市经典初印象";
+const maxLegTravelMinutes = 300;
 const categoryLocalizationMap = new Map<string, string>([
   ["history", "历史"],
   ["historic", "历史"],
@@ -215,11 +216,16 @@ export function getDailyCapacity(pace: TripRequest["pace"]) {
 }
 
 function findTravelMinutes(matrix: TravelMatrixEntry[], fromId: string, toId: string) {
-  return (
+  const rawMinutes =
     matrix.find((entry) => entry.fromPoiId === fromId && entry.toPoiId === toId)?.minutes ??
     matrix.find((entry) => entry.fromPoiId === toId && entry.toPoiId === fromId)?.minutes ??
-    20
-  );
+    20;
+
+  if (!Number.isFinite(rawMinutes)) {
+    return 20;
+  }
+
+  return clamp(Math.round(rawMinutes), 0, maxLegTravelMinutes);
 }
 
 function getDayTitle(request: TripRequest, dayIndex: number, dayPois: Poi[]) {

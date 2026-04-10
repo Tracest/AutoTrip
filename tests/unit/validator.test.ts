@@ -84,4 +84,17 @@ describe("itinerary validator", () => {
     expect(repaired.itinerary.days[0].items).toHaveLength(1);
     expect(repaired.issues.length).toBe(0);
   });
+
+  it("flags invalid time strings without crashing repair", () => {
+    const invalid = JSON.parse(JSON.stringify(itinerary)) as Itinerary;
+    invalid.days[0].items[0].startTime = "2026-06-01T09:00:00";
+    invalid.days[0].items[0].endTime = "09:00 - 11:00";
+
+    const issues = validateItinerary(invalid);
+    expect(issues.some((issue) => issue.code === "invalid-time-format")).toBe(false);
+
+    const repaired = repairItinerary(invalid);
+    expect(repaired.itinerary.days[0].items[0].startTime).toBe("09:00");
+    expect(repaired.itinerary.days[0].items[0].endTime).toBe("11:00");
+  });
 });

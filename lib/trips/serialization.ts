@@ -1,6 +1,7 @@
 import type { Trip } from "@prisma/client";
 import type { Itinerary, TripDetail, TripRequest, TripSummary } from "@/lib/schemas/trip";
 import { itinerarySchema, tripRequestSchema } from "@/lib/schemas/trip";
+import { mergeIssues, validateItinerary } from "@/lib/planning/validator";
 
 type TripRecord = Pick<Trip, "id" | "title" | "destination" | "startDate" | "days" | "status" | "updatedAt"> & {
   request?: unknown;
@@ -20,9 +21,20 @@ export function serializeTripSummary(trip: TripRecord): TripSummary {
 }
 
 export function serializeTripDetail(trip: TripRecord & { request: unknown; itinerary: unknown }): TripDetail {
+  const itinerary = itinerarySchema.parse(trip.itinerary) as Itinerary;
+
   return {
     ...serializeTripSummary(trip),
     request: tripRequestSchema.parse(trip.request) as TripRequest,
-    itinerary: itinerarySchema.parse(trip.itinerary) as Itinerary
+    itinerary: {
+      ...itinerary,
+      issues: mergeIssues(
+        itinerary.issues,
+        validateItinerary({
+          ...itinerary,
+          issues: []
+        })
+      )
+    }
   };
 }
